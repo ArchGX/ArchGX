@@ -17,6 +17,8 @@ sudo apt install gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf make git \
                  squashfs-tools util-linux python3
 ```
 
+Building the release's installer app also needs [Go](https://go.dev/dl/) 1.22 or newer. It has no other dependencies and cross-compiles for every platform from Linux.
+
 ## 1. Get the console's system partition from your card
 
 Use the installer's backup (`archgx-stock-rootfs.img`), or read it from a card image:
@@ -58,7 +60,27 @@ The result is `build/payload/`: the files the installer adds to the console. The
 
 ```sh
 sudo installer/archgx-install.sh install card.img --payload build/payload
-scripts/make-release.sh build dist          # -> dist/archgx-<VERSION>.tar.gz
+scripts/make-release.sh build dist
+```
+
+The release step produces:
+- `dist/ArchGX-Installer-<VERSION>-{Windows.exe,macOS-AppleSilicon,macOS-Intel,Linux}`;
+- `dist/archgx-<VERSION>.tar.gz`;
+- `dist/SHA256SUMS`.
+
+### The installer app
+
+`installer/app/` is a Go program with no outside libraries:
+- a small SquashFS 4.0 (gzip) reader and writer (`squashfs.go`);
+- the same changes as the shell installer (`patch.go`);
+- GPT parsing and card detection (`disk*.go`).
+
+The payload is embedded at build time. To test it against a stock system partition:
+
+```sh
+cd installer/app
+tar -C ../../build/payload -czf payload.tar.gz . && cp ../../VERSION .
+STOCK=stock-rootfs.img PAYLOAD=payload.tar.gz OUT=/tmp/gp.sqfs go test -run TestConvert -v
 ```
 
 ### Emulating parts of the system

@@ -6,7 +6,8 @@ ArchGX's own code is licensed under the **GNU General Public License v3 or later
 
 | Component | Files in the release | Licence | Source |
 |---|---|---|---|
-| ArchGX | `pce-launcher`, `pce-normalize`, `gx-start.sh`, `gx-reset.sh`, `fix_storage.sh`, configs, installer | GPL-3.0-or-later | This repository |
+| ArchGX | `pce-launcher`, `pce-normalize`, `gx-start.sh`, `gx-reset.sh`, `fix_storage.sh`, configs, installer script, installer app | GPL-3.0-or-later | This repository |
+| Go standard library and runtime | built into the installer app | BSD-3-Clause | https://go.dev |
 | **RetroArch** v1.7.4 with the ArchGX patch | `usr/bin/retroarch` | GPL-3.0-or-later | Upstream https://github.com/libretro/RetroArch tag `v1.7.4` (commit `02e23be`), plus [`retroarch/0001-archgx-retron-gx.patch`](retroarch/0001-archgx-retron-gx.patch) and the build recipe ([`retroarch/`](retroarch/), [`scripts/build.sh`](scripts/build.sh)) |
 | libretro-common (inside RetroArch) | built into `retroarch` and the filters | MIT-style (per-file headers) | RetroArch tree, `libretro-common/` |
 | RetroArch video filter "Blargg NTSC SNES" | `blargg_ntsc_snes.so` | GPL-3.0 wrapper (RetroArch); `snes_ntsc` 0.2.2 by Shay Green is LGPL-2.1-or-later | RetroArch tree, `gfx/video_filters/` |

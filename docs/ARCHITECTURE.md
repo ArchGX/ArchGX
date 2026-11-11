@@ -28,7 +28,11 @@
 
 ## What ArchGX changes in the system partition
 
-The installer (`installer/archgx-install.sh`) unpacks the user's own stock SquashFS, then:
+Both installers do the same:
+- the app (`installer/app/`, its own SquashFS reader/writer, for Windows, macOS and Linux);
+- the script (`installer/archgx-install.sh`, using squashfs-tools).
+
+Each reads the user's own stock SquashFS from the card, then:
 
 1. **Adds the ArchGX payload**:
    - `/etc/gx-start.sh`, `/etc/gx-reset.sh` and `/etc/fix_storage.sh`;

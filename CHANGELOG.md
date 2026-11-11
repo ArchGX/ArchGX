@@ -8,6 +8,7 @@
   - backs up the original system partition;
   - verifies after writing;
   - can update and uninstall (`restore`).
+- Installer **app** for Windows, macOS and Linux: finds the card by itself, one confirmation, no other tools needed. It contains its own SquashFS reader/writer and does the same as the script.
 - Only the system partition changes. Nothing from Hyperkin or Rockchip is distributed.
 
 **Library**

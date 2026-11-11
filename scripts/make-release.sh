@@ -6,9 +6,9 @@
 #   build-dir: output of scripts/build.sh (default: build/)
 #   dist-dir:  where the archive goes   (default: dist/)
 #
-# The archive contains only ArchGX files: the installer, the payload (our
-# binaries and scripts), checksums, the licence and the third-party notices.
-# No Hyperkin or Rockchip files: the installer works on the user's own card.
+# Produces the installer app for Windows, macOS and Linux (needs Go 1.22+) and
+# archgx-<version>.tar.gz (installer script + payload) with SHA256SUMS.
+# Only ArchGX files are included: both installers work on the user's own card.
 set -eu
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=$(cd "${1:-$TOP/build}" && pwd)
@@ -39,6 +39,24 @@ plus 0001-archgx-retron-gx.patch (included here), with the build recipe in
 retroarch/ and scripts/build.sh of the ArchGX repository. RetroArch is GPL-3.0;
 see THIRD_PARTY.md.
 EOF
-( cd "$DIST" && tar --owner=0 --group=0 -czf "$NAME.tar.gz" "$NAME" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
-echo "release: $DIST/$NAME.tar.gz"
-cat "$DIST/$NAME.tar.gz.sha256"
+( cd "$DIST" && tar --owner=0 --group=0 -czf "$NAME.tar.gz" "$NAME" )
+
+# installer app (Windows, macOS, Linux): the payload is embedded in it
+APP=$TOP/installer/app
+tar --owner=0 --group=0 -C "$BUILD/payload" -czf "$APP/payload.tar.gz" .
+cp "$TOP/VERSION" "$APP/VERSION"
+for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
+	os=${t%/*}; arch=${t#*/}
+	case $t in
+		windows/amd64) out="ArchGX-Installer-$V-Windows.exe" ;;
+		darwin/arm64)  out="ArchGX-Installer-$V-macOS-AppleSilicon" ;;
+		darwin/amd64)  out="ArchGX-Installer-$V-macOS-Intel" ;;
+		linux/amd64)   out="ArchGX-Installer-$V-Linux" ;;
+	esac
+	( cd "$APP" && GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$DIST/$out" . )
+done
+rm -f "$APP/payload.tar.gz" "$APP/VERSION"
+
+( cd "$DIST" && sha256sum "$NAME.tar.gz" ArchGX-Installer-"$V"-* > SHA256SUMS )
+echo "release files in $DIST:"
+cat "$DIST/SHA256SUMS"

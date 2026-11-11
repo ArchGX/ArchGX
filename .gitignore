@@ -5,3 +5,5 @@ stock-rootfs/
 *.img
 *.img.sha256
 __pycache__/
+installer/app/payload.tar.gz
+installer/app/VERSION
