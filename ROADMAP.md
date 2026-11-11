@@ -15,11 +15,11 @@ The first public build: library, HuCards, the in-game menu with save slots, rewi
 
 | Item | Why |
 |---|---|
+| **SuperGrafx and CD games** | In beta as GP2-beta1: needs hardware testing for speed |
 | **Bad-read detection** | Recognise garbage or nearly-correct HuCard reads (one bit off a known game's header) and ask for a reinsert instead of adding an unknown cart |
 | **Four players** | Up to 4 pads (2 controller ports + 2 USB) for games like Dungeon Explorer; per-game input settings where a game needs them |
 | **Screenshot viewer** | Browse `screenshots/` from the library |
 | **Fine rewind** | After jumping to a snapshot, step back frame by frame using RetroArch's rewind buffer |
-| **Installer for Windows** | A simple tool that works on the card directly, without WSL |
 | **Faster start** | Our own init script without the stock bad-block scan at every boot |
 
 ## Later

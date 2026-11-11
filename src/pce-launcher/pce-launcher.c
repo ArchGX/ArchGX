@@ -54,8 +54,9 @@
 
 /* ------------------------------------------------------------------ data */
 
-typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; } Game;
-#define ARCHGX_VERSION "GP1"
+enum { K_HUCARD, K_SGX, K_CD };
+typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
+#define ARCHGX_VERSION "GP2-beta1"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -105,7 +106,8 @@ static int has_state(const char *path)
 {
     const char *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
     char p[1024];
-    int n = (int)strlen(file) - 4, i;
+    const char *dot = strrchr(file, '.');
+    int n = dot ? (int)(dot - file) : (int)strlen(file), i;
     if (n <= 0) return 0;
     for (i = -1; i <= 9; i++) {
         if (i < 0) snprintf(p, sizeof p, "%s/%.*s.state", saves_dir, n, file);
@@ -127,10 +129,127 @@ static int cart_crc(const char *file, char crc[9])
 static volatile sig_atomic_t quit_flag;
 static volatile sig_atomic_t last_event;
 
-static int has_pce_ext(const char *n)
+static int has_ext(const char *n, const char *ext)
 {
-    size_t l = strlen(n);
-    return l > 4 && strcasecmp(n + l - 4, ".pce") == 0;
+    size_t l = strlen(n), e = strlen(ext);
+    return l > e && strcasecmp(n + l - e, ext) == 0;
+}
+
+/* library files: HuCards, SuperGrafx and CD images (-1: not a game) */
+static int game_kind(const char *n)
+{
+    if (has_ext(n, ".pce")) return K_HUCARD;
+    if (has_ext(n, ".sgx")) return K_SGX;
+    if (has_ext(n, ".cue") || has_ext(n, ".chd") || has_ext(n, ".ccd") || has_ext(n, ".m3u")) return K_CD;
+    return -1;
+}
+
+/* file names a .cue (FILE "x" ...) or .m3u (one per line) refers to; calls
+ * fn(dir, name, arg) for each. Returns the number found. */
+static int each_ref(const char *dir, const char *file, void (*fn)(const char *, const char *, void *), void *arg)
+{
+    char p[1024], line[1024];
+    int n = 0, m3u = has_ext(file, ".m3u");
+    FILE *f;
+    snprintf(p, sizeof p, "%s/%s", dir, file);
+    if (!(f = fopen(p, "r"))) return 0;
+    while (fgets(line, sizeof line, f)) {
+        char *a = line, *b;
+        line[strcspn(line, "\r\n")] = '\0';
+        while (*a == ' ' || *a == '\t') a++;
+        if (m3u) {
+            if (!*a || *a == '#') continue;
+        } else {
+            if (strncasecmp(a, "FILE", 4) || (a[4] != ' ' && a[4] != '\t')) continue;
+            a += 5; while (*a == ' ' || *a == '\t') a++;
+            if (*a == '"') { a++; if (!(b = strchr(a, '"'))) continue; *b = '\0'; }
+            else if ((b = strpbrk(a, " \t"))) *b = '\0';
+        }
+        if (strchr(a, '/') || strchr(a, '\\') || !*a) continue;   /* same folder only */
+        fn(dir, a, arg); n++;
+    }
+    fclose(f);
+    return n;
+}
+
+static int recent_rank(const char *file);
+static void add_game(const char *dir, const char *name, int kind)
+{
+    size_t nl = strlen(name);
+    const char *t = title_for(name);
+    char crc[9], *p, *lab = NULL;
+    if (ngames >= MAX_GAMES - 8) return;
+    if (!(p = malloc(strlen(dir) + nl + 2))) return;
+    sprintf(p, "%s/%s", dir, name);
+    if (t) lab = strdup(t);
+    else if (cart_crc(name, crc)) {
+        if ((lab = malloc(32))) snprintf(lab, 32, "Unknown HuCard (%s)", crc);
+    } else if ((lab = strdup(name))) {
+        char *dot = strrchr(lab, '.');
+        if (dot && dot != lab) *dot = '\0';
+    }
+    if (!lab) { free(p); return; }
+    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
+    games[ngames].recent = recent_rank(name); games[ngames].kind = kind;
+    ngames++;
+}
+
+/* names referred to by a .m3u/.cue in the same folder are not listed */
+#define MAX_HIDE 256
+static char *hide[MAX_HIDE];
+static int nhide;
+static void hide_ref(const char *dir, const char *name, void *arg)
+{
+    (void)dir; (void)arg;
+    if (nhide < MAX_HIDE) hide[nhide++] = strdup(name);
+}
+static int hidden(const char *name)
+{
+    int i;
+    for (i = 0; i < nhide; i++) if (hide[i] && !strcasecmp(hide[i], name)) return 1;
+    return 0;
+}
+
+/* one folder: its games, minus discs that a playlist (.m3u) already lists */
+static void scan_dir(const char *dir, int depth)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    if (!d) return;
+    while (nhide) free(hide[--nhide]);
+    while ((e = readdir(d)))
+        if (e->d_name[0] != '.' && has_ext(e->d_name, ".m3u")) each_ref(dir, e->d_name, hide_ref, NULL);
+    rewinddir(d);
+    while ((e = readdir(d)) && ngames < MAX_GAMES - 8) {
+        int k;
+        struct stat st;
+        char p[1024];
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (depth == 0 && stat(p, &st) == 0 && S_ISDIR(st.st_mode)) continue;   /* folders: second pass */
+        if ((k = game_kind(e->d_name)) < 0 || hidden(e->d_name)) continue;
+        add_game(dir, e->d_name, k);
+    }
+    if (depth == 0) {                       /* one level of game folders (CD games) */
+        rewinddir(d);
+        while ((e = readdir(d)) && ngames < MAX_GAMES - 8) {
+            struct stat st;
+            char p[1024];
+            if (e->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+            if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) {
+                int before = ngames;
+                const char *f;
+                scan_dir(p, 1);
+                /* a folder holding one game: show the folder's name (unless retitled) */
+                if (ngames == before + 1 && (f = strrchr(games[before].path, '/')) && !title_for(f + 1)) {
+                    char *lab = strdup(e->d_name);
+                    if (lab) { free(games[before].label); games[before].label = lab; }
+                }
+            }
+        }
+    }
+    closedir(d);
 }
 
 /* recently played games first (newest first), then the rest A-Z */
@@ -173,62 +292,32 @@ static void free_games(void)
 
 static void scan_library(void)
 {
-    DIR *d = opendir(lib_dir);
-    struct dirent *e;
     free_games();
     load_titles();
-    if (d) {
-        while ((e = readdir(d)) && ngames < MAX_GAMES - 1) {
-            size_t nl = strlen(e->d_name);
-            char *p, *lab;
-            if (e->d_name[0] == '.' || !has_pce_ext(e->d_name)) continue;
-            p = malloc(strlen(lib_dir) + nl + 2);
-            lab = malloc(nl + 1);
-            if (!p || !lab) { free(p); free(lab); break; }
-            sprintf(p, "%s/%s", lib_dir, e->d_name);
-            {
-                const char *t = title_for(e->d_name);
-                char crc[9];
-                free(lab);
-                if (t) lab = strdup(t);
-                else if (cart_crc(e->d_name, crc)) {
-                    lab = malloc(32);
-                    if (lab) snprintf(lab, 32, "Unknown HuCard (%s)", crc);
-                } else {
-                    lab = malloc(nl + 1);
-                    if (lab) { memcpy(lab, e->d_name, nl - 4); lab[nl - 4] = '\0'; }
-                }
-                if (!lab) { free(p); break; }
-            }
-            games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL;
-            games[ngames].recent = recent_rank(e->d_name);
-            ngames++;
-        }
-        closedir(d);
-    }
+    scan_dir(lib_dir, 0);
     qsort(games, ngames, sizeof(Game), cmp_games);
     nreal = ngames;
     if (getenv("PCE_LAUNCHER_CART")) {      /* a HuCard is sitting in the slot */
         games[ngames].path = strdup("__CART__");
         games[ngames].label = strdup("Play the HuCard in the slot");
-        games[ngames].tex = NULL;
+        games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
         ngames++;
     }
     games[ngames].path = strdup("__PADTEST__");
     games[ngames].label = strdup("Controller test");
-    games[ngames].tex = NULL; games[ngames].recent = 0;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
     ngames++;
     games[ngames].path = strdup("__ABOUT__");
     games[ngames].label = strdup("About");
-    games[ngames].tex = NULL; games[ngames].recent = 0;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
     ngames++;
     games[ngames].path = strdup("__RETROARCH__");
     games[ngames].label = strdup("RetroArch (advanced)");
-    games[ngames].tex = NULL;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
     ngames++;
     games[ngames].path = strdup("__RESTART__");
     games[ngames].label = strdup("Restart console");
-    games[ngames].tex = NULL;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
     ngames++;
 }
 
@@ -277,17 +366,39 @@ static int exists(const char *p) { return access(p, F_OK) == 0; }
 
 /* Delete a library game. Copies of it that the library made in data/ (to
  * run it from there) go too; raw cartridge dumps and save files stay. */
+static void unlink_ref(const char *dir, const char *name, void *arg)
+{
+    char p[1024];
+    (void)arg;
+    if (has_ext(name, ".cue")) each_ref(dir, name, unlink_ref, NULL);   /* m3u -> cue -> tracks */
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    unlink(p);
+}
+
 static int delete_game(int idx)
 {
-    char base[NAME_MAX_LEN * 2], p[1024];
+    char base[NAME_MAX_LEN * 2], p[1024], dir[1024];
     static const char *suffix[] = { ".pce", "-fixed.pce" };
+    const char *path = games[idx].path, *slash = strrchr(path, '/'), *file = slash ? slash + 1 : path;
     int i;
-    snprintf(base, sizeof base, "%s", games[idx].label);
-    for (i = 0; i < 2; i++) {
-        snprintf(p, sizeof p, "%s/%s%s", data_dir, base, suffix[i]);
-        if (exists(p) && files_equal(p, games[idx].path)) unlink(p);
+    snprintf(dir, sizeof dir, "%.*s", slash ? (int)(slash - path) : 1, slash ? path : ".");
+    if (games[idx].kind == K_CD) {
+        /* the disc's own files: tracks named in a .cue, discs in a .m3u, a .ccd's .img/.sub */
+        if (has_ext(file, ".cue") || has_ext(file, ".m3u")) each_ref(dir, file, unlink_ref, NULL);
+        else if (has_ext(file, ".ccd")) {
+            static const char *cx[] = { ".img", ".sub", ".IMG", ".SUB" };
+            int n = (int)strlen(file) - 4;
+            for (i = 0; i < 4; i++) { snprintf(p, sizeof p, "%s/%.*s%s", dir, n, file, cx[i]); unlink(p); }
+        }
+    } else {
+        snprintf(base, sizeof base, "%s", games[idx].label);
+        for (i = 0; i < 2; i++) {
+            snprintf(p, sizeof p, "%s/%s%s", data_dir, base, suffix[i]);
+            if (exists(p) && files_equal(p, path)) unlink(p);
+        }
     }
-    if (unlink(games[idx].path) != 0) return -1;
+    if (unlink(path) != 0) return -1;
+    if (strcmp(dir, lib_dir)) rmdir(dir);      /* a game folder: removed once empty */
     sync();
     SDL_Log("deleted %s", games[idx].path);
     return 0;
@@ -1698,7 +1809,7 @@ int main(int argc, char **argv)
 
         if (!nreal) {
             text(f_item, "No games in the library yet.", white, W / 2, H * 45 / 100, 1);
-            text(f_hint, "Insert a HuCard to dump it, or copy .pce files", dim, W / 2, H * 55 / 100, 1);
+            text(f_hint, "Insert a HuCard to dump it, or copy games (.pce .sgx .cue .chd)", dim, W / 2, H * 55 / 100, 1);
             text(f_hint, "into the \"games\" folder on the SD card.", dim, W / 2, H * 60 / 100, 1);
         }
         for (i = 0; i < rows && top + i < ngames; i++) {
@@ -1712,14 +1823,19 @@ int main(int argc, char **argv)
                 fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
                 fill(list_x - W / 80, y, W / 200 + 2, row_h - 4, accent.r, accent.g, accent.b, 255);
             }
-            if (g->recent)
-                text(f_hint, "Recent", dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+            if (top + i < nreal && (g->recent || g->kind != K_HUCARD)) {
+                static const char *kn[] = { "", "SGX", "CD" };
+                char tag[24];
+                snprintf(tag, sizeof tag, "%s%s%s", g->recent ? "Recent" : "", g->recent && g->kind ? "  " : "", kn[g->kind]);
+                text(f_hint, tag, dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+            }
             if (top + i > 0 && top + i < nreal && !g->recent && games[top + i - 1].recent)
                 fill(list_x, y - 2, list_w, 1, 255, 255, 255, 60);      /* end of the recent block */
             if (g->tex) {
                 SDL_Rect dst = { list_x + W / 60, y + (row_h - 4 - g->th) / 2, g->tw, g->th };
                 SDL_Rect src;
-                if (dst.w > list_w - W / 30 - (g->recent ? W / 10 : 0)) dst.w = list_w - W / 30 - (g->recent ? W / 10 : 0);
+                int tagw = (g->recent ? W / 10 : 0) + (g->kind ? W / 20 : 0);
+                if (dst.w > list_w - W / 30 - tagw) dst.w = list_w - W / 30 - tagw;
                 src.x = 0; src.y = 0; src.w = dst.w; src.h = g->th;
                 SDL_SetTextureAlphaMod(g->tex, top + i == sel ? 255 : 190);
                 SDL_RenderCopy(ren, g->tex, &src, &dst);

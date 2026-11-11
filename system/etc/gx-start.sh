@@ -6,7 +6,8 @@
 # Started by rcS once Weston is up. Replaces Hyperkin's check_firmware,
 # tgdumper-loading, menu and shell scripts. Uses ArchGX's own tools
 # (pce-launcher, pce-normalize, fix_storage.sh, ArchGX's RetroArch build)
-# plus the console's existing Beetle PCE Fast core.
+# plus the console's existing Beetle PCE Fast core (HuCards, CD games) and
+# ArchGX's build of Beetle SuperGrafx (SuperGrafx games).
 #
 #   cart in the slot  -> dump is cleaned, identified (gamedb), filed in games/, played
 #   no cart           -> game picker; the chosen game is played
@@ -16,7 +17,11 @@
 # Logs (FAT partition): logs/gx-start.log, logs/retroarch.log (last game)
 #
 # Card layout (FAT partition, /userdata/rom):
-#   games/              ROMs. A file name never changes once created.
+#   games/              ROMs. A file name never changes once created. HuCards (.pce),
+#                       SuperGrafx (.sgx) and CD games (.cue/.chd/.ccd/.m3u, loose
+#                       or one folder per game)
+#   bios/               CD System Card (syscard3.pce etc.); a System Card in the
+#                       slot is saved here
 #   saves/              battery saves (.srm) and save states, named after the ROM file
 #   titles.txt          "file<TAB>title": names shown in the picker (Rename edits this)
 #   archgx-settings.cfg Options menu choices
@@ -37,6 +42,8 @@ FILTER_DIR=/usr/lib/retroarch/filters/video
 CART_MNT=/media/usb1                 # pce-launcher watches this path
 CART_FILE=$CART_MNT/Test_pcengine.pce
 CORE=/usr/lib/libretro/beetlepcefast_libretro.so
+SGX_CORE=/usr/lib/libretro/mednafen_supergrafx_libretro.so   # ArchGX build (GP2)
+SYS_DIR=/userdata                    # RetroArch system directory: the cores look for BIOS files here
 RA_CFG=/userdata/retroarch/retroarch.cfg
 CORE_OPTS=/userdata/retroarch/retroarch-core-options.cfg
 GX_RA_CFG=/etc/gx-retroarch.cfg      # our settings on top of the stock config (saves folder, simple menu)
@@ -46,6 +53,7 @@ RA_DIR=/userdata/retroarch           # rcS copies RA_STORE here (RAM) at every b
 RA_STORE=/userdata/retroarch_org     # persistent copy on the userdata partition
 ROM=/userdata/rom
 SAVES=$ROM/saves
+BIOS_DIR=$ROM/bios
 TITLES=$ROM/titles.txt
 LOCAL_DB=$ROM/gamedb-local.csv
 SETTINGS=$ROM/archgx-settings.cfg      # Options menu choices (aspect, filter, volume...)
@@ -126,7 +134,52 @@ core_opt() {
 		echo "$1 = \"$2\"" >> "$CORE_OPTS"
 	fi
 }
-set_core_defaults() { core_opt pce_disable_softreset enabled; }
+set_core_defaults() {
+	core_opt pce_disable_softreset enabled
+	core_opt sgx_disable_softreset enabled
+	core_opt sgx_forcesgx enabled           # only SuperGrafx games are sent to this core
+}
+
+# What a library file is: hucard, sgx or cd. SuperGrafx HuCards are known by
+# their .sgx name or their CRC32 (the core's own list plus our gamedb).
+SGX_CRCS="8c4588e2 d206e241 4c2126b0 3b13af61 b486a8ed 1f041166 bebfe042"
+game_kind() {
+	case "$1" in
+	*.[cC][uU][eE]|*.[cC][hH][dD]|*.[cC][cC][dD]|*.[mM]3[uU]|*.[tT][oO][cC]) echo cd ;;
+	*.[sS][gG][xX]) echo sgx ;;
+	*)	c=$(crc32_of "$1")
+		case " $SGX_CRCS " in *" $c "*) echo sgx ;; *) echo hucard ;; esac ;;
+	esac
+}
+
+# CD games need a System Card image. Use the best one found in bios/ (or
+# already in the system folder), copy it where the cores look, and choose it.
+# Prints the option value ("System Card 3") or nothing if there is none.
+cd_bios() {
+	mkdir -p "$BIOS_DIR"
+	for e in "syscard3.pce:System Card 3" "syscard3u.pce:System Card 3 US" \
+	         "syscard2.pce:System Card 2" "syscard2u.pce:System Card 2 US" "syscard1.pce:System Card 1"; do
+		f=${e%%:*}
+		if [ -f "$BIOS_DIR/$f" ]; then
+			cmp -s "$BIOS_DIR/$f" "$SYS_DIR/$f" || cp "$BIOS_DIR/$f" "$SYS_DIR/$f" || continue
+		fi
+		[ -f "$SYS_DIR/$f" ] && { echo "${e#*:}"; return 0; }
+	done
+	[ -f "$BIOS_DIR/gexpress.pce" ] && cp "$BIOS_DIR/gexpress.pce" "$SYS_DIR/" 2>/dev/null
+	return 1
+}
+
+# System Card HuCards (normalized CRC32) -> BIOS file name
+syscard_file() {
+	case "$1" in
+	6d9a73ef) echo syscard3.pce ;;
+	2b5b75fe) echo syscard3u.pce ;;
+	52520bc6|283b74e0) echo syscard2.pce ;;
+	ff2a5ec3) echo syscard2u.pce ;;
+	3f9f95a4) echo syscard1.pce ;;
+	51a12d90) echo gexpress.pce ;;
+	esac
+}
 
 # CRC32 of a file (gzip stores it in its trailer) and the raw header bytes at 0x200
 crc32_of() { gzip -c "$1" | tail -c 8 | head -c 4 | hexdump -e '1/4 "%08x"'; }
@@ -257,7 +310,7 @@ apply_settings() {
 		audio_volume = "$db"
 	EOC
 	[ "$(setting flicker 0)" = 1 ] && spr=enabled || spr=disabled
-	core_opt pce_nospritelimit "$spr"
+	core_opt pce_nospritelimit "$spr"; core_opt sgx_nospritelimit "$spr"
 	printf 'turbo1=%s\nturbo2=%s\n' "$(setting turbo1 0)" "$(setting turbo2 0)" > $TMP/ra-set
 	log "settings: aspect=$aspect filter=${filt##*/} smooth=$smooth volume=$vol flicker=$spr turbo=$(setting turbo1 0)/$(setting turbo2 0)"
 }
@@ -283,7 +336,13 @@ ensure_display() {
 
 run_game() {
 	title=$(title_of "$1")
-	base=$(basename "$1" .pce)
+	base=$(basename "$1"); base=${base%.*}
+	kind=$(game_kind "$1"); core=$CORE; bios=""
+	case $kind in
+	sgx) if [ -f "$SGX_CORE" ]; then core=$SGX_CORE; else log "SuperGrafx core missing, using PCE core"; fi ;;
+	cd)  if bios=$(cd_bios); then core_opt pce_fast_cdbios "$bios"; core_opt sgx_cdbios "$bios"
+	     else show_error "CD games need a System Card" "Put syscard3.pce in the bios folder, or insert a System Card"; return; fi ;;
+	esac
 	mkdir -p $STATES_TMP; rm -f $STATES_TMP/*
 	apply_settings
 	cfgs="$GX_RA_CFG|$GX_SET_CFG"
@@ -293,7 +352,7 @@ run_game() {
 			cfgs="$cfgs|$GX_RESUME_CFG"; log "resume from $(basename "$st")"
 		fi
 	fi
-	log "play: $1 ($title)"
+	log "play: $1 ($title) [$kind${bios:+, $bios}]"
 	mark_recent "$1"
 	set_core_defaults
 	echo "$title" > /tmp/SelectGame.txt      # read by the console's Beetle core (per-game input code)
@@ -302,7 +361,7 @@ run_game() {
 	# kept open here (fd 3) so RetroArch never sees end-of-file
 	[ -f $LOGD/retroarch.log ] && mv $LOGD/retroarch.log $LOGD/retroarch.log.1 2>/dev/null
 	rm -f $RA_FIFO; mkfifo $RA_FIFO; exec 3<>$RA_FIFO
-	/usr/bin/retroarch -v -c $RA_CFG --appendconfig "$cfgs" -L $CORE "$1" < $RA_FIFO > $LOGD/retroarch.log 2>&1 &
+	/usr/bin/retroarch -v -c $RA_CFG --appendconfig "$cfgs" -L $core "$1" < $RA_FIFO > $LOGD/retroarch.log 2>&1 &
 	ra=$!
 	# no measurable load progress: keep the spinner until RetroArch shows the game
 	n=0; started=""
@@ -355,17 +414,30 @@ play_cart() {
 	title=$(db_title "$crc" "$hdr")
 	if [ -n "$title" ]; then log "cart: identified as \"$title\" (crc32 $crc, header $hdr)"
 	else log "cart: not in the game database (crc32 $crc, header $hdr)"; fi
+	sc=$(syscard_file "$crc")
+	if [ -n "$sc" ]; then                          # a System Card: keep it as the CD BIOS
+		mkdir -p "$BIOS_DIR"
+		if cp $TMP/cart.pce "$BIOS_DIR/$sc.part" && mv "$BIOS_DIR/$sc.part" "$BIOS_DIR/$sc" && sync; then
+			log "cart: System Card saved as bios/$sc"
+			rm -f $TMP/raw.pce
+			status_show "System Card saved" "CD games can now be played (bios/$sc)" "" ""; sleep 3; status_close
+		else
+			rm -f "$BIOS_DIR/$sc.part"; show_error "Could not save the System Card" "Is the SD card full?"
+		fi
+		return
+	fi
 	status "Preparing game..." "${title:-Unknown HuCard ($crc)}" "-" ""
+	ext=pce; case " $SGX_CRCS " in *" $crc "*) ext=sgx ;; esac   # SuperGrafx HuCard
 	s=$(stat -c %s $TMP/cart.pce); game=""
-	for f in "$GAMES"/*.pce; do             # same game already in the library?
+	for f in "$GAMES"/*.pce "$GAMES"/*.sgx; do             # same game already in the library?
 		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
 	done
 	if [ -z "$game" ]; then
 		if [ -n "$title" ]; then
-			game="$GAMES/$(safe_name "$title").pce"
-			[ -e "$game" ] && game="$GAMES/$(safe_name "$title") [$crc].pce"
+			game="$GAMES/$(safe_name "$title").$ext"
+			[ -e "$game" ] && game="$GAMES/$(safe_name "$title") [$crc].$ext"
 		else
-			game=$GAMES/cart-$crc.pce        # the picker offers to name it (Rename)
+			game=$GAMES/cart-$crc.$ext       # the picker offers to name it (Rename)
 		fi
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
@@ -382,9 +454,9 @@ play_cart() {
 # ---------------------------------------------------------------- main
 mkdir -p $TMP
 [ -x /etc/fix_storage.sh ] && /etc/fix_storage.sh      # our storage-partition fix
-mkdir -p "$GAMES" "$LOGD" "$SAVES"
+mkdir -p "$GAMES" "$LOGD" "$SAVES" "$BIOS_DIR"
 [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 262144 ] && mv "$LOG" "$LOG.old"
-log "==== ArchGX GP1 ($(date))"
+log "==== $(cat /etc/archgx-release 2>/dev/null || echo ArchGX) ($(date))"
 
 # Recovery: "reset-retroarch-settings" on the card restores the stock RetroArch settings
 if [ -f "$ROM/reset-retroarch-settings" ]; then

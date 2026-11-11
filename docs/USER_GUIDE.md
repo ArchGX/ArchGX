@@ -18,7 +18,7 @@ A USB keyboard works too: arrows, Enter, Escape (back), Tab (SELECT).
 
 ## The Game Library
 
-The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z.
+The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z. SuperGrafx games are marked **SGX** and CD games **CD**.
 
 **Starting a game**
 - If a game has a save, you're asked: **Resume last save**, **Start new game** or **Cancel**. Resume continues from your newest save slot.
@@ -46,6 +46,20 @@ Insert a HuCard and ArchGX takes over:
 - **Bad reads:** dirty contacts can produce a wrong read, which shows up as an unknown cart. Delete it, clean the cart and reinsert it.
 
 ArchGX mounts the reader read-only and never sends it commands.
+
+**SuperGrafx HuCards** (Daimakaimura, Aldynes, Battle Ace, Madou King Granzort, 1941 Counter Attack, Darius Plus) are stored as `<Title>.sgx` and run on the Beetle SuperGrafx core. Copied `.sgx` files work the same way.
+
+**System Cards** are not played: inserting one saves it to `bios/` so CD games can use it (message "System Card saved").
+
+## CD games (beta)
+
+Copy CD games into `games/`, either loose or one folder per game (one folder level is scanned):
+- `.cue` with its `.bin` tracks, `.chd`, or `.ccd` with `.img`/`.sub`;
+- multi-disc games: an `.m3u` playlist listing the discs. Only the playlist is shown.
+
+CD games need a **System Card** image in the card's `bios/` folder. Either insert your System Card (it is saved automatically) or copy a dump named `syscard3.pce` (Super CD-ROM² 3.0), `syscard3u.pce` (TurboGrafx Super System Card), `syscard2.pce`, `syscard2u.pce` or `syscard1.pce`. The best one present is used, in that order. ArchGX doesn't include any BIOS files.
+
+Deleting a CD game removes its tracks too, and its folder once empty. Saves, save states and rewind work as for HuCards.
 
 ## The in-game menu
 
@@ -82,7 +96,8 @@ The large partition of the SD card (shown as `RETRONGX` on a PC) holds everythin
 
 | Path | Contents |
 |---|---|
-| `games/` | Your games (`.pce`). Copy your own dumps here from a PC |
+| `games/` | Your games (`.pce`, `.sgx`, `.cue`, `.chd`, `.ccd`, `.m3u`; CD games may sit in one folder each). Copy your own dumps here from a PC |
+| `bios/` | CD System Card images (`syscard3.pce` …) |
 | `saves/` | Battery saves (`.srm`) and save states (`.state1`–`.state4` with `.png` pictures) |
 | `screenshots/` | Screenshots from the in-game menu |
 | `titles.txt` | Names shown in the library (file name, a tab, then the name) |

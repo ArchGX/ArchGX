@@ -1,5 +1,23 @@
 # Changelog
 
+## GP2-beta1: SuperGrafx and CD games (beta)
+
+**New**
+- **SuperGrafx:** ArchGX now ships Beetle SuperGrafx, built from upstream source. SuperGrafx games (`.sgx`, or a known SuperGrafx HuCard by checksum) run on it; everything else stays on the stock core. SuperGrafx HuCards dumped in the slot are stored as `.sgx`. "Reduce flicker" also applies to this core.
+- **CD games:** `.cue`/`.bin`, `.chd`, `.ccd` and `.m3u` (multi-disc) in `games/`, loose or one folder per game. Tracks and discs named by a playlist are hidden; a folder holding one game shows the folder name.
+- **System Card as BIOS:** inserting a System Card saves it to `bios/` instead of playing it. CD games pick the best System Card present (3.0 > US 3.0 > 2.x > US 2.0 > 1.0); without one a clear message says what to do.
+- Library markers **SGX** and **CD**. Deleting a CD game removes its tracks and empty folder.
+
+**Under the hood**
+- glibc 2.26 shim: `fstatat64`, `arc4random*`, `__libc_single_threaded`, `__ioctl_time64` (needed by the new core).
+- The startup log shows the installed build from `/etc/archgx-release`.
+
+**Known issues / to check on hardware**
+- CD speed on the Cortex-A7, especially `.chd` (decompressed on the fly).
+- SuperGrafx speed (two video chips: heavier than PCE).
+- Arcade Card games are not supported by the stock core.
+- The System Card checksums for 1.0/2.0/2.1 come from the game database and are not yet confirmed with real cards.
+
 ## GP1: first public build
 
 **Install**

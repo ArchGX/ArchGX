@@ -1,6 +1,6 @@
-From efabafb385baad0f44289c9f41a1fac400366de5 Mon Sep 17 00:00:00 2001
+From 7bd9b9b56366874439bda2cb70586e62a007f3f1 Mon Sep 17 00:00:00 2001
 From: ArchGX <archgx@users.noreply.github.com>
-Date: Tue, 10 Nov 2026 23:24:37 -0500
+Date: Wed, 11 Nov 2026 08:22:21 -0500
 Subject: [PATCH] ArchGX: RetroN GX support
 
 ---
@@ -8,8 +8,8 @@ Subject: [PATCH] ArchGX: RetroN GX support
  gfx/video_filters/ArchGX_Scanlines.filt |   4 +
  gfx/video_filters/archgx_scanlines.c    | 160 ++++++++++++++++++++++++
  input/input_driver.c                    |   8 ++
- retroarch.c                             | 140 +++++++++++++++++++++
- 5 files changed, 327 insertions(+), 2 deletions(-)
+ retroarch.c                             | 144 +++++++++++++++++++++
+ 5 files changed, 331 insertions(+), 2 deletions(-)
  create mode 100644 gfx/video_filters/ArchGX_Scanlines.filt
  create mode 100644 gfx/video_filters/archgx_scanlines.c
 
@@ -273,7 +273,7 @@ index 8b397d0..7fcd34a 100644
        bsv_movie_ctl(BSV_MOVIE_CTL_SET_INPUT, &res);
  
 diff --git a/retroarch.c b/retroarch.c
-index 42c8fa2..f753a3d 100644
+index 42c8fa2..48cac4c 100644
 --- a/retroarch.c
 +++ b/retroarch.c
 @@ -118,6 +118,8 @@
@@ -285,7 +285,7 @@ index 42c8fa2..f753a3d 100644
  #include "retroarch.h"
  
  #include "command.h"
-@@ -3350,6 +3352,142 @@ void runloop_unset(enum runloop_action action)
+@@ -3350,6 +3352,146 @@ void runloop_unset(enum runloop_action action)
   * button input in order to wake up the loop,
   * -1 if we forcibly quit out of the RetroArch iteration loop.
   **/
@@ -296,7 +296,7 @@ index 42c8fa2..f753a3d 100644
 + *    later flips are applied.
 + * 2. Settings changed in the ArchGX in-game menu: /tmp/gx/ra-set, lines
 + *    key=value: aspect=0|1, filter=<.filt path or empty>, smooth=0|1,
-+ *    volume=<dB>, sprites=0|1 (pce_nospritelimit), turbo1=0|1, turbo2=0|1.
++ *    volume=<dB>, sprites=0|1 (pce_/sgx_nospritelimit), turbo1=0|1, turbo2=0|1.
 + *    Re-read when its modification time changes; unchanged values are skipped.
 + * 3. Turbo for buttons I and II: see input_state() in input_driver.c. */
 +unsigned archgx_turbo_mask = 0;   /* bit 0 = I (RetroPad A), bit 1 = II (RetroPad B) */
@@ -358,7 +358,11 @@ index 42c8fa2..f753a3d 100644
 +      audio_set_float(AUDIO_ACTION_VOLUME_GAIN, v);
 +   }
 +   else if (string_is_equal(key, "sprites"))
++   {
++      /* Beetle PCE Fast and Beetle SuperGrafx name this option differently */
 +      archgx_core_option("pce_nospritelimit", val[0] == '1' ? "enabled" : "disabled");
++      archgx_core_option("sgx_nospritelimit", val[0] == '1' ? "enabled" : "disabled");
++   }
 +   else if (string_is_equal(key, "turbo1"))
 +      archgx_turbo_mask = (archgx_turbo_mask & ~1u) | (val[0] == '1' ? 1u : 0u);
 +   else if (string_is_equal(key, "turbo2"))
@@ -428,7 +432,7 @@ index 42c8fa2..f753a3d 100644
  int runloop_iterate(unsigned *sleep_ms)
  {
     unsigned i;
-@@ -3383,6 +3521,8 @@ int runloop_iterate(unsigned *sleep_ms)
+@@ -3383,6 +3525,8 @@ int runloop_iterate(unsigned *sleep_ms)
        runloop_frame_time.callback(delta);
     }
  
