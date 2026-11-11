@@ -1,0 +1,439 @@
+From efabafb385baad0f44289c9f41a1fac400366de5 Mon Sep 17 00:00:00 2001
+From: ArchGX <archgx@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 23:24:37 -0500
+Subject: [PATCH] ArchGX: RetroN GX support
+
+---
+ command.c                               |  17 ++-
+ gfx/video_filters/ArchGX_Scanlines.filt |   4 +
+ gfx/video_filters/archgx_scanlines.c    | 160 ++++++++++++++++++++++++
+ input/input_driver.c                    |   8 ++
+ retroarch.c                             | 140 +++++++++++++++++++++
+ 5 files changed, 327 insertions(+), 2 deletions(-)
+ create mode 100644 gfx/video_filters/ArchGX_Scanlines.filt
+ create mode 100644 gfx/video_filters/archgx_scanlines.c
+
+diff --git a/command.c b/command.c
+index 40f6310..d96a458 100644
+--- a/command.c
++++ b/command.c
+@@ -26,6 +26,10 @@
+ #include <string/stdstring.h>
+ #include <streams/file_stream.h>
+ #include <streams/stdin_stream.h>
++#ifndef _WIN32
++#include <fcntl.h>
++#include <unistd.h>
++#endif
+ 
+ #ifdef HAVE_CONFIG_H
+ #include "config.h"
+@@ -431,6 +435,7 @@ static bool command_verify(const char *cmd)
+ 
+    return false;
+ }
++#endif /* ArchGX: command parsing below is also needed for stdin */
+ 
+ #ifdef HAVE_COMMAND
+ static void command_parse_sub_msg(command_t *handle, const char *tok)
+@@ -470,6 +475,7 @@ static void command_parse_msg(command_t *handle, char *buf, enum cmd_source_t so
+    lastcmd_source = CMD_NONE;
+ }
+ 
++#if defined(HAVE_NETWORKING) && defined(HAVE_NETWORK_CMD) /* ArchGX */
+ static void command_network_poll(command_t *handle)
+ {
+    fd_set fds;
+@@ -570,6 +576,14 @@ static bool command_stdin_init(command_t *handle)
+ #ifdef HAVE_NETWORKING
+    if (!socket_nonblock(STDIN_FILENO))
+       return false;
++#else
++   /* ArchGX: without networking stdin was left blocking, which stalls
++    * the run loop on the first poll. */
++   {
++      int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
++      if (flags < 0 || fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0)
++         return false;
++   }
+ #endif
+ #endif
+ 
+@@ -651,9 +665,8 @@ static void command_stdin_poll(command_t *handle)
+    *last_newline++ = '\0';
+    msg_len         = last_newline - handle->stdin_buf;
+ 
+-#if defined(HAVE_NETWORKING)
++   /* ArchGX: parse stdin commands without networking too (was HAVE_NETWORKING only). */
+    command_parse_msg(handle, handle->stdin_buf, CMD_STDIN);
+-#endif
+ 
+    memmove(handle->stdin_buf, last_newline,
+          handle->stdin_buf_ptr - msg_len);
+diff --git a/gfx/video_filters/ArchGX_Scanlines.filt b/gfx/video_filters/ArchGX_Scanlines.filt
+new file mode 100644
+index 0000000..2cc0c00
+--- /dev/null
++++ b/gfx/video_filters/ArchGX_Scanlines.filt
+@@ -0,0 +1,4 @@
++filter = archgx_scanlines
++
++# brightness of the dark lines: 0.0 = black, 1.0 = no effect
++archgx_scanlines_scanline_brightness = "0.5"
+diff --git a/gfx/video_filters/archgx_scanlines.c b/gfx/video_filters/archgx_scanlines.c
+new file mode 100644
+index 0000000..51fdf46
+--- /dev/null
++++ b/gfx/video_filters/archgx_scanlines.c
+@@ -0,0 +1,160 @@
++/* ArchGX scanline filter for RetroArch softfilters (RetroN GX alternative firmware).
++ * Doubles the picture height: even output lines are the original line,
++ * odd output lines are the same line darkened ("scanline_brightness",
++ * 0.0 = black gaps, 1.0 = no effect; default 0.5). RGB565 and XRGB8888. */
++#include "softfilter.h"
++#include <stdlib.h>
++#include <stdint.h>
++
++#ifdef RARCH_INTERNAL
++#define softfilter_get_implementation archgx_scanlines_get_implementation
++#define softfilter_thread_data archgx_scanlines_softfilter_thread_data
++#define filter_data archgx_scanlines_filter_data
++#endif
++
++struct softfilter_thread_data
++{
++   void *out_data;
++   const void *in_data;
++   size_t out_pitch;
++   size_t in_pitch;
++   unsigned width;
++   unsigned height;
++   unsigned level;    /* brightness of the dark line, 0..256 */
++};
++
++struct filter_data
++{
++   unsigned threads;
++   struct softfilter_thread_data *workers;
++   unsigned in_fmt;
++   unsigned level;
++};
++
++static unsigned sl_input_fmts(void) { return SOFTFILTER_FMT_XRGB8888 | SOFTFILTER_FMT_RGB565; }
++static unsigned sl_output_fmts(unsigned input_fmts) { return input_fmts; }
++static unsigned sl_threads(void *data) { return ((struct filter_data*)data)->threads; }
++
++static void *sl_create(const struct softfilter_config *config,
++      unsigned in_fmt, unsigned out_fmt, unsigned max_width, unsigned max_height,
++      unsigned threads, softfilter_simd_mask_t simd, void *userdata)
++{
++   float b = 0.5f;
++   struct filter_data *filt = (struct filter_data*)calloc(1, sizeof(*filt));
++   (void)out_fmt; (void)max_width; (void)max_height; (void)simd;
++   if (!filt)
++      return NULL;
++   if (config && config->get_float)
++      config->get_float(userdata, "scanline_brightness", &b, 0.5f);
++   if (b < 0.0f) b = 0.0f;
++   if (b > 1.0f) b = 1.0f;
++   filt->level   = (unsigned)(b * 256.0f + 0.5f);
++   filt->workers = (struct softfilter_thread_data*)calloc(threads, sizeof(*filt->workers));
++   filt->threads = threads;
++   filt->in_fmt  = in_fmt;
++   if (!filt->workers) { free(filt); return NULL; }
++   return filt;
++}
++
++static void sl_output(void *data, unsigned *out_width, unsigned *out_height,
++      unsigned width, unsigned height)
++{
++   (void)data;
++   *out_width  = width;
++   *out_height = height * 2;
++}
++
++static void sl_destroy(void *data)
++{
++   struct filter_data *filt = (struct filter_data*)data;
++   if (!filt) return;
++   free(filt->workers);
++   free(filt);
++}
++
++static void sl_work_rgb565(void *data, void *thread_data)
++{
++   struct softfilter_thread_data *thr = (struct softfilter_thread_data*)thread_data;
++   const uint16_t *in = (const uint16_t*)thr->in_data;
++   uint16_t *out      = (uint16_t*)thr->out_data;
++   unsigned x, y, l   = thr->level;
++   (void)data;
++   for (y = 0; y < thr->height; y++)
++   {
++      uint16_t *dark = out + (thr->out_pitch >> 1);
++      for (x = 0; x < thr->width; x++)
++      {
++         unsigned p = in[x];
++         unsigned r = (((p >> 11) & 0x1f) * l) >> 8;
++         unsigned g = (((p >> 5) & 0x3f) * l) >> 8;
++         unsigned b = ((p & 0x1f) * l) >> 8;
++         out[x]  = (uint16_t)p;
++         dark[x] = (uint16_t)((r << 11) | (g << 5) | b);
++      }
++      in  += thr->in_pitch >> 1;
++      out += thr->out_pitch;         /* two output lines (pitch is in bytes) */
++   }
++}
++
++static void sl_work_xrgb8888(void *data, void *thread_data)
++{
++   struct softfilter_thread_data *thr = (struct softfilter_thread_data*)thread_data;
++   const uint32_t *in = (const uint32_t*)thr->in_data;
++   uint32_t *out      = (uint32_t*)thr->out_data;
++   unsigned x, y, l   = thr->level;
++   (void)data;
++   for (y = 0; y < thr->height; y++)
++   {
++      uint32_t *dark = out + (thr->out_pitch >> 2);
++      for (x = 0; x < thr->width; x++)
++      {
++         uint32_t p  = in[x];
++         uint32_t rb = (((p & 0xff00ff) * l) >> 8) & 0xff00ff;
++         uint32_t g  = (((p & 0x00ff00) * l) >> 8) & 0x00ff00;
++         out[x]  = p;
++         dark[x] = rb | g;
++      }
++      in  += thr->in_pitch >> 2;
++      out += thr->out_pitch >> 1;    /* two output lines */
++   }
++}
++
++static void sl_packets(void *data, struct softfilter_work_packet *packets,
++      void *output, size_t output_stride,
++      const void *input, unsigned width, unsigned height, size_t input_stride)
++{
++   unsigned i;
++   struct filter_data *filt = (struct filter_data*)data;
++   for (i = 0; i < filt->threads; i++)
++   {
++      struct softfilter_thread_data *thr = &filt->workers[i];
++      unsigned y_start = (height * i) / filt->threads;
++      unsigned y_end   = (height * (i + 1)) / filt->threads;
++      thr->out_data  = (uint8_t*)output + y_start * 2 * output_stride;
++      thr->in_data   = (const uint8_t*)input + y_start * input_stride;
++      thr->out_pitch = output_stride;
++      thr->in_pitch  = input_stride;
++      thr->width     = width;
++      thr->height    = y_end - y_start;
++      thr->level     = filt->level;
++      packets[i].work = filt->in_fmt == SOFTFILTER_FMT_XRGB8888 ? sl_work_xrgb8888 : sl_work_rgb565;
++      packets[i].thread_data = thr;
++   }
++}
++
++static const struct softfilter_implementation archgx_scanlines = {
++   sl_input_fmts, sl_output_fmts, sl_create, sl_destroy, sl_threads, sl_output, sl_packets,
++   SOFTFILTER_API_VERSION, "ArchGX Scanlines", "archgx_scanlines",
++};
++
++const struct softfilter_implementation *softfilter_get_implementation(softfilter_simd_mask_t simd)
++{
++   (void)simd;
++   return &archgx_scanlines;
++}
++
++#ifdef RARCH_INTERNAL
++#undef softfilter_get_implementation
++#undef softfilter_thread_data
++#undef filter_data
++#endif
+diff --git a/input/input_driver.c b/input/input_driver.c
+index 8b397d0..7fcd34a 100644
+--- a/input/input_driver.c
++++ b/input/input_driver.c
+@@ -648,6 +648,8 @@ void input_poll(void)
+  * Returns: Non-zero if the given key (identified by @id)
+  * was pressed by the user (assigned to @port).
+  **/
++extern unsigned archgx_turbo_mask, archgx_frame;   /* ArchGX, retroarch.c */
++
+ int16_t input_state(unsigned port, unsigned device,
+       unsigned idx, unsigned id)
+ {
+@@ -763,6 +765,12 @@ int16_t input_state(unsigned port, unsigned device,
+       }
+    }
+ 
++   /* ArchGX: turbo for I (RetroPad A) and II (RetroPad B), 2 frames on, 2 off */
++   if (res && archgx_turbo_mask && device == RETRO_DEVICE_JOYPAD
++         && (((archgx_turbo_mask & 1u) && id == RETRO_DEVICE_ID_JOYPAD_A)
++          || ((archgx_turbo_mask & 2u) && id == RETRO_DEVICE_ID_JOYPAD_B)))
++      res = ((archgx_frame >> 1) & 1) ? 0 : res;
++
+    if (bsv_movie_is_playback_off())
+       bsv_movie_ctl(BSV_MOVIE_CTL_SET_INPUT, &res);
+ 
+diff --git a/retroarch.c b/retroarch.c
+index 42c8fa2..f753a3d 100644
+--- a/retroarch.c
++++ b/retroarch.c
+@@ -118,6 +118,8 @@
+ #include "version.h"
+ #include "version_git.h"
+ 
++#include <sys/stat.h>
++#include <time.h>
+ #include "retroarch.h"
+ 
+ #include "command.h"
+@@ -3350,6 +3352,142 @@ void runloop_unset(enum runloop_action action)
+  * button input in order to wake up the loop,
+  * -1 if we forcibly quit out of the RetroArch iteration loop.
+  **/
++/* ArchGX additions (RetroN GX alternative firmware), polled from runloop_iterate:
++ * 1. Front-panel aspect switch, live. The adc-vol driver exposes it as one
++ *    digit: '0' = 4:3, '1' = 16:9 (= aspect_ratio_index). The position at
++ *    start is only recorded (the launcher already chose the start aspect);
++ *    later flips are applied.
++ * 2. Settings changed in the ArchGX in-game menu: /tmp/gx/ra-set, lines
++ *    key=value: aspect=0|1, filter=<.filt path or empty>, smooth=0|1,
++ *    volume=<dB>, sprites=0|1 (pce_nospritelimit), turbo1=0|1, turbo2=0|1.
++ *    Re-read when its modification time changes; unchanged values are skipped.
++ * 3. Turbo for buttons I and II: see input_state() in input_driver.c. */
++unsigned archgx_turbo_mask = 0;   /* bit 0 = I (RetroPad A), bit 1 = II (RetroPad B) */
++unsigned archgx_frame      = 0;
++
++static void archgx_core_option(const char *key, const char *val)
++{
++   size_t i, j;
++   if (!runloop_core_options)
++      return;
++   for (i = 0; i < runloop_core_options->size; i++)
++   {
++      struct core_option *o = &runloop_core_options->opts[i];
++      if (!o->key || strcmp(o->key, key) != 0 || !o->vals)
++         continue;
++      for (j = 0; j < o->vals->size; j++)
++         if (string_is_equal(o->vals->elems[j].data, val))
++         {
++            if (o->index != j)
++               core_option_manager_set_val(runloop_core_options, i, j);
++            return;
++         }
++   }
++}
++
++static void archgx_apply_setting(settings_t *settings, const char *key, const char *val)
++{
++   if (string_is_equal(key, "aspect"))
++   {
++      unsigned idx = (val[0] == '1') ? ASPECT_RATIO_16_9 : ASPECT_RATIO_4_3;
++      if (settings->uints.video_aspect_ratio_idx != idx)
++      {
++         settings->uints.video_aspect_ratio_idx = idx;
++         command_event(CMD_EVENT_VIDEO_SET_ASPECT_RATIO, NULL);
++      }
++   }
++   else if (string_is_equal(key, "filter"))
++   {
++      if (!string_is_equal(settings->paths.path_softfilter_plugin, val))
++      {
++         strlcpy(settings->paths.path_softfilter_plugin, val,
++               sizeof(settings->paths.path_softfilter_plugin));
++         command_event(CMD_EVENT_REINIT, NULL);
++      }
++   }
++   else if (string_is_equal(key, "smooth"))
++   {
++      bool v = val[0] == '1';
++      if (settings->bools.video_smooth != v)
++      {
++         settings->bools.video_smooth = v;
++         video_driver_set_filtering(1, v);
++      }
++   }
++   else if (string_is_equal(key, "volume"))
++   {
++      float v = (float)atof(val);
++      settings->floats.audio_volume = v;
++      audio_set_float(AUDIO_ACTION_VOLUME_GAIN, v);
++   }
++   else if (string_is_equal(key, "sprites"))
++      archgx_core_option("pce_nospritelimit", val[0] == '1' ? "enabled" : "disabled");
++   else if (string_is_equal(key, "turbo1"))
++      archgx_turbo_mask = (archgx_turbo_mask & ~1u) | (val[0] == '1' ? 1u : 0u);
++   else if (string_is_equal(key, "turbo2"))
++      archgx_turbo_mask = (archgx_turbo_mask & ~2u) | (val[0] == '1' ? 2u : 0u);
++   else
++      return;
++   RARCH_LOG("[ArchGX] setting %s=%s\n", key, val);
++}
++
++static void archgx_poll(settings_t *settings)
++{
++   static unsigned counter = 0;
++   static int last = -1;
++   static time_t set_mtime = 0;
++   static long set_nsec    = -1;
++   struct stat st;
++   char c = 0;
++   FILE *f;
++
++   archgx_frame++;
++   if (++counter < 30)
++      return;
++   counter = 0;
++
++   f = fopen("/sys/devices/platform/adc-vol/ratio", "r");
++   if (f)
++   {
++      if (fread(&c, 1, 1, f) != 1)
++         c = 0;
++      fclose(f);
++      if ((c == '0' || c == '1') && c - '0' != last)
++      {
++         if (last >= 0)
++         {
++            RARCH_LOG("[ArchGX] aspect switch: %c -> %s\n", c, c == '1' ? "16:9" : "4:3");
++            settings->uints.video_aspect_ratio_idx = (c == '1') ? ASPECT_RATIO_16_9 : ASPECT_RATIO_4_3;
++            command_event(CMD_EVENT_VIDEO_SET_ASPECT_RATIO, NULL);
++         }
++         else
++            RARCH_LOG("[ArchGX] aspect switch at start: %c\n", c);
++         last = c - '0';
++      }
++   }
++
++   if (stat("/tmp/gx/ra-set", &st) == 0
++         && (st.st_mtime != set_mtime || st.st_mtim.tv_nsec != set_nsec))
++   {
++      char line[512];
++      set_mtime = st.st_mtime;
++      set_nsec  = st.st_mtim.tv_nsec;
++      if ((f = fopen("/tmp/gx/ra-set", "r")))
++      {
++         while (fgets(line, sizeof(line), f))
++         {
++            char *eq = strchr(line, '=');
++            line[strcspn(line, "\r\n")] = '\0';
++            if (!eq)
++               continue;
++            *eq = '\0';
++            archgx_apply_setting(settings, line, eq + 1);
++         }
++         fclose(f);
++      }
++   }
++}
++
+ int runloop_iterate(unsigned *sleep_ms)
+ {
+    unsigned i;
+@@ -3383,6 +3521,8 @@ int runloop_iterate(unsigned *sleep_ms)
+       runloop_frame_time.callback(delta);
+    }
+ 
++   archgx_poll(settings);
++
+    switch ((enum runloop_state)
+          runloop_check_state(
+             settings,
