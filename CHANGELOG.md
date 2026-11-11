@@ -1,5 +1,10 @@
 # Changelog
 
+## GP2-beta4: hardware check on screen
+
+- 20 seconds after power-on, the library checks for the cart reader (2e25:988c) and the front USB ports (hub 1a40:0101) every 2 seconds. If one is missing, a red line under the list says so ("Cart reader not found: HuCards and the controller ports won't work", "Front USB ports not found", or "Cart reader is in update mode: restart the console"). It clears by itself when the device comes back.
+- About shows "Cart reader: OK / not found" and "Front USB ports: OK / not found". The result also goes to `logs/launcher.log`.
+
 ## GP2-beta3: USB event log (hardware work)
 
 - `logs/usb.log` lists the USB devices present at start-up, then every device that appears (+) or disappears (−), with its ID, speed and name. Read-only: nothing is sent to any device.

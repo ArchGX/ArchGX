@@ -56,7 +56,7 @@
 
 enum { K_HUCARD, K_SGX, K_CD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta3"
+#define ARCHGX_VERSION "GP2-beta4"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -1535,9 +1535,77 @@ static int run_ingame(const char *title)
 /* ------------------------------------------------- library: About, pad test */
 #include <sys/statvfs.h>
 
+/* ---------------------------------------------------- hardware check */
+/* The cart reader (BTE TG Dumper, 2e25:988c: HuCard slot + both pad ports)
+ * and the front USB ports (hub 1a40:0101) are USB devices. If one is missing
+ * some time after start-up, say so on screen instead of failing silently. */
+#define HW_READER   1
+#define HW_READER_X 2      /* a 2e25 device with another ID (update mode?) */
+#define HW_HUB      4
+#define HW_GRACE_S  20     /* seconds after power-on before warning */
+static int hw_flags = HW_READER | HW_HUB, hw_checked;
+
+static int read_hex(const char *path)
+{
+    char b[16];
+    FILE *f = fopen(path, "r");
+    int v = -1;
+    if (f) { if (fgets(b, sizeof b, f)) v = (int)strtol(b, NULL, 16); fclose(f); }
+    return v;
+}
+
+static int hw_scan(void)
+{
+    const char *root = getenv("PCE_LAUNCHER_USB") ? getenv("PCE_LAUNCHER_USB") : "/sys/bus/usb/devices";   /* test hook */
+    DIR *d = opendir(root);
+    struct dirent *e;
+    char p[300];
+    int fl = 0;
+    if (!d) return HW_READER | HW_HUB;     /* not on the console: no warning */
+    while ((e = readdir(d))) {
+        int vid, pid;
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s/idVendor", root, e->d_name);
+        if ((vid = read_hex(p)) < 0) continue;
+        snprintf(p, sizeof p, "%s/%s/idProduct", root, e->d_name);
+        pid = read_hex(p);
+        if (vid == 0x2e25) fl |= pid == 0x988c ? HW_READER : HW_READER_X;
+        if (vid == 0x1a40 && pid == 0x0101) fl |= HW_HUB;
+    }
+    closedir(d);
+    return fl;
+}
+
+/* returns 1 when the result changed (the screen needs a redraw) */
+static int hw_check(void)
+{
+    double up = 0;
+    FILE *f = fopen("/proc/uptime", "r");
+    int old = hw_flags;
+    if (f) { if (fscanf(f, "%lf", &up) != 1) up = 0; fclose(f); }
+    if (up < HW_GRACE_S) return 0;
+    hw_flags = hw_scan();
+    if (!hw_checked || hw_flags != old) {
+        hw_checked = 1;
+        if (!(hw_flags & HW_READER)) SDL_Log("hardware: cart reader not found%s", hw_flags & HW_READER_X ? " (a BTE device with another ID is present)" : "");
+        if (!(hw_flags & HW_HUB)) SDL_Log("hardware: front USB ports (hub) not found");
+        return hw_flags != old;
+    }
+    return 0;
+}
+
+static const char *hw_warning(void)
+{
+    if (!(hw_flags & HW_READER))
+        return hw_flags & HW_READER_X ? "Cart reader is in update mode: restart the console"
+                                      : "Cart reader not found: HuCards and the controller ports won't work";
+    if (!(hw_flags & HW_HUB)) return "Front USB ports not found";
+    return NULL;
+}
+
 static void draw_about(void)
 {
-    int pw = W * 70 / 100, ph = H * 58 / 100, px, py, nst = 0, lh = H / 17, y;
+    int pw = W * 70 / 100, ph = H * 66 / 100, px, py, nst = 0, lh = H / 17, y;
     char line[160];
     struct statvfs vf;
     DIR *d = opendir(saves_dir);
@@ -1561,6 +1629,11 @@ static void draw_about(void)
         snprintf(line, sizeof line, "SD card: %.1f GB free of %.1f GB", fr, tot);
         text(f_item, line, white, W / 2, y, 1);
     }
+    y += lh;
+    snprintf(line, sizeof line, "Cart reader: %s", hw_flags & HW_READER ? "OK" : "not found");
+    text(f_item, line, hw_flags & HW_READER ? white : red, W / 2 - W / 40, y, 2);
+    snprintf(line, sizeof line, "Front USB ports: %s", hw_flags & HW_HUB ? "OK" : "not found");
+    text(f_item, line, hw_flags & HW_HUB ? white : red, W / 2 + W / 40, y, 0);
     y += lh * 3 / 2;
     text(f_hint, "RetroArch 1.7.4 (with ArchGX patch)  -  Beetle PCE Fast", dim, W / 2, y, 1); y += lh;
     text(f_hint, "github.com/ArchGX/ArchGX  -  not affiliated with Hyperkin", dim, W / 2, y, 1);
@@ -1905,6 +1978,10 @@ int main(int argc, char **argv)
             }
         }
         if (mode == M_MESSAGE && now >= msg_until && !shot) { mode = M_LIST; dirty = 1; }
+        {   /* hardware check every 2 s */
+            static Uint32 hw_next;
+            if (now >= hw_next) { hw_next = now + 2000; if (hw_check()) dirty = 1; }
+        }
 
         if (now - last_cart > 500) {
             unsigned long cs = cart_state();
@@ -1983,6 +2060,7 @@ int main(int argc, char **argv)
                                   : "I / RUN  Play       SELECT  Game options       Left/Right  Page",
              dim, W / 2, H * 91 / 100, 1);
 
+        if (hw_warning()) text(f_hint, hw_warning(), red, W / 2, H * 86 / 100, 1);
         if (mode == M_ABOUT) draw_about();
         if (mode == M_PLAY) {
             static const char *items[] = { "Resume last save", "Start new game", "Cancel" };
