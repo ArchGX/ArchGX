@@ -56,7 +56,7 @@
 
 enum { K_HUCARD, K_SGX, K_CD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta2"
+#define ARCHGX_VERSION "GP2-beta3"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5

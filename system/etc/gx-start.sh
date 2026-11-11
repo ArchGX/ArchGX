@@ -509,6 +509,30 @@ fi
 
 cart_watch &
 
+# USB event log (read-only, for hardware work): every device that appears or
+# disappears, with its ID and name, goes to logs/usb.log
+usb_list() {
+	for d in $SYS/bus/usb/devices/*; do
+		[ -f "$d/idVendor" ] || continue
+		echo "${d##*/} $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/speed" 2>/dev/null)M $(cat "$d/manufacturer" 2>/dev/null) $(cat "$d/product" 2>/dev/null)"
+	done | sort
+}
+usb_watch() {
+	u=$LOGD/usb.log; [ -f "$u" ] && [ "$(stat -c %s "$u")" -gt 131072 ] && mv "$u" "$u.old"
+	prev=$TMP/usb.prev; usb_list > $prev
+	{ echo "$(cut -d' ' -f1 /proc/uptime)s ---- boot, devices present:"; sed 's/^/   /' $prev; } >> "$u"; sync
+	while :; do
+		sleep 0.5
+		usb_list > $TMP/usb.now
+		if ! cmp -s $prev $TMP/usb.now; then
+			t=$(cut -d' ' -f1 /proc/uptime)
+			{ grep -vxF -f $prev $TMP/usb.now | sed "s/^/${t}s + /"; grep -vxF -f $TMP/usb.now $prev | sed "s/^/${t}s - /"; } >> "$u"; sync
+			mv $TMP/usb.now $prev
+		fi
+	done
+}
+usb_watch &
+
 # cart in at power-on: play it straight away (reader ~2-5 s, dump file up to ~15 s)
 t=0
 while [ ! -f "$CART_FILE" ] && { [ $t -lt 8 ] || { [ $t -lt 20 ] && [ -n "$(reader_part)" ]; }; }; do

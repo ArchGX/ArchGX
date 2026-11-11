@@ -1,5 +1,10 @@
 # Changelog
 
+## GP2-beta3: USB event log (hardware work)
+
+- `logs/usb.log` lists the USB devices present at start-up, then every device that appears (+) or disappears (−), with its ID, speed and name. Read-only: nothing is sent to any device.
+- Game database: header signatures for 1941 Counter Attack, Aldynes and Daimakaimura.
+
 ## GP2-beta2: game options for SuperGrafx and System Card dumps
 
 Hardware test of GP2-beta1: SuperGrafx games and a CD game (Sylphia, .cue) ran at full speed. System Card and SuperGrafx carts were dumped as unknown HuCards, because the reader dumps 1 MB whatever the card holds.
