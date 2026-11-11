@@ -1,0 +1,7 @@
+build/
+dist/
+sysroot/
+stock-rootfs/
+*.img
+*.img.sha256
+__pycache__/
