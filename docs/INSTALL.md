@@ -1,108 +1,116 @@
 # Installing ArchGX
 
-ArchGX is installed by a script that changes **one** partition of the RetroN GX's SD card: the system partition ("rootfs"). It takes the system that's already on your card, adds ArchGX's files, switches off Hyperkin's own launcher programs, and writes it back.
+ArchGX is installed by an app that runs on your computer. It changes **one** partition of the RetroN GX's SD card: the system partition. It reads the system that's already on your card, adds ArchGX, and writes it back.
 
 The installer never touches:
 - the bootloader;
 - the kernel;
 - the settings partition;
-- the partition that holds your games and saves.
+- the partition with your games and saves.
 
 ## What you need
 
-- A Hyperkin RetroN GX and **its SD card** with the stock firmware `RubyMain-20250709`. The installer checks this and refuses anything else.
-- A PC with **Linux**, or **Windows 10/11 with WSL** (Ubuntu).
-- An SD card reader.
-- The tools `squashfs-tools` and `util-linux`, which nearly every Linux system has. On Ubuntu:
+- A Hyperkin RetroN GX and **its SD card**, with the stock firmware `RubyMain-20250709`. The installer checks this and refuses anything else.
+- A computer with Windows, macOS or Linux, and an SD card reader.
+- The installer for your computer, from the [Releases page](https://github.com/ArchGX/ArchGX/releases):
 
-  ```sh
-  sudo apt install squashfs-tools util-linux
-  ```
+| Computer | Download |
+|---|---|
+| Windows 10/11 | `ArchGX-Installer-GP1-Windows.exe` |
+| Mac with Apple chip (M1 and later) | `ArchGX-Installer-GP1-macOS-AppleSilicon` |
+| Mac with Intel chip | `ArchGX-Installer-GP1-macOS-Intel` |
+| Linux (x86-64) | `ArchGX-Installer-GP1-Linux` |
 
-- The release archive `archgx-GP1.tar.gz` from the [Releases page](https://github.com/ArchGX/ArchGX/releases). Check it against `archgx-GP1.tar.gz.sha256`.
+**Before you start:** copy anything you care about off the card's large partition (shown as a drive when you plug the card in). The installer leaves it alone, but a backup is always wise.
 
-## 1. Back up the whole card first
+## Windows
 
-The installer saves the original system partition on its own. A full copy of the card is still the safest undo for anything.
+1. Put the RetroN GX's SD card in your computer's card reader.
+2. Double-click **`ArchGX-Installer-GP1-Windows.exe`**.
+   - If Windows says *"Windows protected your PC"*, click **More info**, then **Run anyway**. ArchGX isn't signed with a paid certificate.
+   - Allow it to make changes (administrator access is needed to write to the card).
+3. The installer finds the card by itself and checks it. Type **Y** and press Enter.
+4. When it says **Done**, eject the card, put it in the console and switch it on.
 
-**Linux:** find the card with `lsblk` (for example `/dev/sdb`; make sure it's the card and not your own disk), then:
+## Mac
 
-```sh
-sudo dd if=/dev/sdX of=retron-gx-backup.img bs=4M status=progress
-```
-
-**Windows:** use [Win32 Disk Imager](https://sourceforge.net/projects/win32diskimager/): pick the card's drive letter, a file name, then **Read**.
-
-## 2. Install
-
-### Linux (card in a reader)
-
-```sh
-tar xzf archgx-GP1.tar.gz
-cd archgx-GP1
-sudo ./installer/archgx-install.sh check   /dev/sdX
-sudo ./installer/archgx-install.sh install /dev/sdX
-```
-
-`check` tells you whether the card has the supported stock system. `install`:
-1. saves the original system partition as `archgx-stock-rootfs.img`, in the current folder;
-2. builds the ArchGX system partition from it;
-3. asks you to type `yes`;
-4. writes the new partition and verifies it.
-
-**Keep `archgx-stock-rootfs.img`.** It undoes the install, and you need it for updates.
-
-Unmount the card's partitions before installing, if your desktop mounted them automatically.
-
-### Windows (WSL)
-
-WSL can't always reach SD card readers, so work on a card image instead:
-
-1. In Win32 Disk Imager, **Read** the card into `card.img`, for example in `C:\retrongx\`.
-2. In Ubuntu (WSL):
+1. Put the SD card in your Mac's card reader.
+2. Open **Terminal** (Applications → Utilities) and type these commands, pressing Enter after each:
 
    ```sh
-   sudo apt install squashfs-tools util-linux
-   cd /mnt/c/retrongx
-   tar xzf archgx-GP1.tar.gz
-   sudo ./archgx-GP1/installer/archgx-install.sh install card.img
+   cd ~/Downloads
+   chmod +x ArchGX-Installer-GP1-macOS-*
+   xattr -d com.apple.quarantine ArchGX-Installer-GP1-macOS-* 2>/dev/null
+   sudo ./ArchGX-Installer-GP1-macOS-AppleSilicon     # or ...-macOS-Intel
    ```
 
-3. In Win32 Disk Imager, **Write** `card.img` back to the card.
+   Enter your Mac password when asked.
+3. Type **Y** and press Enter. The installer unmounts the card's drive by itself before writing.
+4. When it says **Done**, eject the card, put it in the console and switch it on.
 
-## 3. First start
+## Linux
 
-Put the card in the console and switch it on.
+```sh
+chmod +x ArchGX-Installer-GP1-Linux
+sudo ./ArchGX-Installer-GP1-Linux
+```
 
-On a freshly flashed card, the storage partition is first enlarged to fill the card. This takes a few seconds, once. Any files already on that partition are kept: they're copied to memory and put back.
+Unmount (eject) the card's drive first if your desktop mounted it.
+
+## The backup it makes
+
+On the first install, the installer saves the card's original system partition **next to the installer**, as `archgx-stock-rootfs.img` (48 MB).
+
+**Keep that file.** It lets you:
+- **Uninstall:** run the installer with `--restore`, or see "Uninstalling" below. It writes the stock system back.
+- **Update to a newer ArchGX:** run the newer installer with the backup in the same folder.
+
+## First start
+
+On a freshly flashed card, the storage partition is first enlarged to fill the card. This takes a few seconds, once. Any files already on that partition are kept.
 
 Games and saves from the stock firmware (its `data/` folder) are copied into the ArchGX library once. Nothing is deleted.
 
 Then the **Game Library** appears. Insert a HuCard, or copy `.pce` files to the card's `games/` folder. See the [User guide](USER_GUIDE.md).
 
-## Updating to a newer ArchGX
+## Updating
 
-```sh
-sudo ./installer/archgx-install.sh install /dev/sdX --stock archgx-stock-rootfs.img
-```
-
-On a card that already runs ArchGX, the installer rebuilds from your stock backup. Your games, saves and settings stay on the card.
+Run the installer of the new version with `archgx-stock-rootfs.img` in the same folder. Your games, saves and settings stay on the card.
 
 ## Uninstalling
 
+Put `archgx-stock-rootfs.img` next to the installer, then run it with `--restore`:
+
+| System | Command |
+|---|---|
+| Windows | Open Command Prompt in the folder, then `ArchGX-Installer-GP1-Windows.exe --restore` |
+| Mac | `sudo ./ArchGX-Installer-GP1-macOS-AppleSilicon --restore` |
+| Linux | `sudo ./ArchGX-Installer-GP1-Linux --restore` |
+
+Your games and saves stay on the card; the stock firmware just won't show the ArchGX library.
+
+## Advanced: the installer script
+
+`archgx-GP1.tar.gz` contains the same installation as a shell script, plus the files it installs. Use it on Linux or WSL, or on card image files:
+
 ```sh
+tar xzf archgx-GP1.tar.gz && cd archgx-GP1
+sudo ./installer/archgx-install.sh check   /dev/sdX
+sudo ./installer/archgx-install.sh install /dev/sdX            # or a card image file
 sudo ./installer/archgx-install.sh restore /dev/sdX --stock archgx-stock-rootfs.img
 ```
 
-This writes the original system partition back. Your games and saves stay on the card; the stock firmware just won't show the ArchGX library.
+It needs `squashfs-tools` and `util-linux`. The installer app also works on image files: `--image card.img`.
 
 ## Troubleshooting
 
 | Problem | What to do |
 |---|---|
-| `unknown system partition` | The card doesn't have the stock `RubyMain-20250709` system. Restore your card backup or the stock image, then try again. If you have a different official firmware version, please open an issue. |
-| `is mounted: unmount it first` | Unmount the card's partitions (`sudo umount /dev/sdX*`) and run again. |
-| `no partition named "rootfs"` | Wrong device, or not a RetroN GX card. Check with `lsblk`. |
-| Black screen or stuck at start | Put the card in your PC and look in the `logs/` folder on the large partition. Please attach `gx-start.log`, `retroarch.log` and `launcher.log` to an issue. |
+| "No RetroN GX card found" | Check the card is in the reader. On Windows, make sure you allowed administrator access. Some USB card readers need a moment: press Enter to look again. |
+| "not the stock RetroN GX firmware" | The card has a different system. Flash the official stock image (Hyperkin support provides it), then try again. If you have a different official version, please open an issue. |
+| "this card already runs ArchGX" | To update or uninstall, put `archgx-stock-rootfs.img` from the first install next to the installer. |
+| "a partition ... is mounted" (Linux) | Eject the card's drive in the file manager (keep the card in the reader) and run again. |
+| Writing or verification fails | Try again, or try another card reader. If the card no longer starts, run the installer with `--restore`. |
+| Black screen or stuck at start | Put the card in your computer and look in the `logs/` folder on the large partition. Please attach `gx-start.log`, `retroarch.log` and `launcher.log` to an issue. |
 | A HuCard reads wrongly | Clean the cart's contacts and reinsert it. Wrong reads appear in the library as "Unknown HuCard"; delete them there (SELECT on the game). |
 | RetroArch settings got messed up | Create an empty file named `reset-retroarch-settings` on the card's large partition. The stock RetroArch settings come back at the next start. |

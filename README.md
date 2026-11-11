@@ -54,23 +54,17 @@ It is installed by a script that patches **your own** SD card. ArchGX doesn't co
 
 ## Install
 
-You need:
-- the RetroN GX's own SD card (stock firmware `RubyMain-20250709`);
-- a PC with Linux or Windows (WSL);
-- an SD card reader.
-
-```sh
-tar xzf archgx-GP1.tar.gz && cd archgx-GP1
-sudo ./installer/archgx-install.sh check   /dev/sdX     # is this card supported?
-sudo ./installer/archgx-install.sh install /dev/sdX
-```
+1. Put the RetroN GX's SD card in your computer's card reader.
+2. Download the installer for your computer from **[Releases](https://github.com/ArchGX/ArchGX/releases)**: Windows, macOS (Apple chip or Intel) or Linux.
+3. Run it, then type **Y**.
 
 The installer:
-- checks the card first and refuses anything that isn't the supported stock system;
-- saves a backup of the original system partition;
+- finds the card by itself;
+- checks for the supported stock system (`RubyMain-20250709`) and refuses anything else;
+- saves a backup of the original system next to the installer;
 - leaves your games and saves alone.
 
-`restore` puts the stock system back. Full instructions, including Windows, are in **[docs/INSTALL.md](docs/INSTALL.md)**.
+The backup lets you undo or update the install later. Step-by-step instructions for each system are in **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 ## Documentation
 
