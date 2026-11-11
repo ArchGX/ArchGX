@@ -1,6 +1,6 @@
 crc32,header,title,region,notes
 0xd206e241,,Counter Attack (Super Grafx),,SuperGrafx
-0x8c4588e2,,Counter Attack (Super Grafx),,SuperGrafx
+0x8c4588e2,0x8583a51048a51148,Counter Attack (Super Grafx),,SuperGrafx
 0xfde08d6d,0x65753005c907b003,1943 Kai,,
 0x73614660,0x4c28854a609c0204,21 Emon - Mezase Hotel Ou!!,,
 0x8e71d4f3,0x20a7e720c7e62081,Adventure Island,,
@@ -10,7 +10,7 @@ crc32,header,title,region,notes
 0xca72a828,0x74e774ed2083e520,After Burner II,,
 0x933d5bcc,0x48a93153041a5308,Air Zonk,,
 0xd76c4169,0x48a9315348a93153,Air Zonk,,
-0x4c2126b0,,Aldynes (Super Grafx),,SuperGrafx
+0x4c2126b0,0x0d86a220b4e2e8e0,Aldynes (Super Grafx),,SuperGrafx
 0x60edf4e1,0x0f19222049ff9922,Alien Crush (Japan),Japan,
 0xea488494,0xb92220991d20ad00,"Alien Crush (USA, Europe)","USA, Europe",
 0x04a85769,0x08e28d0300851460,All Star Power League,,
@@ -84,7 +84,7 @@ crc32,header,title,region,notes
 0x4cfb6e3e,0x369c3d22a9f38036,Cyber Core,,
 0xb5326b16,0xc8c8b13ba8b90027,Cyber Dodge,,
 0xa594fac0,0xc6ea4ce2dd4c47c5,Cyber Knight,,
-0xb486a8ed,,Dai Makaimura (Super Grafx),,SuperGrafx
+0xb486a8ed,0xa9068d0000ad1922,Dai Makaimura (Super Grafx),,SuperGrafx
 0x9107bcc8,0x008d9a2dad9b2d69,Dai Senpu,,
 0x61a2935f,0x5310a90a53208a20,Daichi Kun Crisis - Do Natural,,
 0xb0ba689f,0x8d00004304484308,Darius Alpha,,
