@@ -22,7 +22,7 @@ The library lists every game in the card's `games/` folder by name. The five you
 
 **Starting a game**
 - If a game has a save, you're asked: **Resume last save**, **Start new game** or **Cancel**. Resume continues from your newest save slot.
-- **SELECT** on a game opens **Rename** and **Delete**.
+- **SELECT** on a game opens its options: **Rename**, **Delete**, and for HuCards **Mark as SuperGrafx** (or back) and **Use as CD System Card**. Use these when a dump wasn't recognised automatically.
 - Rename changes only the name shown. The file and its saves stay matched, and naming an unknown HuCard also records it for the game database (see [GAMEDB.md](GAMEDB.md)).
 
 **Entries at the bottom of the list**
@@ -49,7 +49,7 @@ ArchGX mounts the reader read-only and never sends it commands.
 
 **SuperGrafx HuCards** (Daimakaimura, Aldynes, Battle Ace, Madou King Granzort, 1941 Counter Attack, Darius Plus) are stored as `<Title>.sgx` and run on the Beetle SuperGrafx core. Copied `.sgx` files work the same way.
 
-**System Cards** are not played: inserting one saves it to `bios/` so CD games can use it (message "System Card saved").
+**System Cards** are not played: inserting one saves it to `bios/` so CD games can use it (message "System Card saved"). If a card isn't recognised, it shows up as an unknown HuCard: choose **Use as CD System Card** in its options. Its first 256 KB are saved to `bios/` and it leaves the library.
 
 ## CD games (beta)
 

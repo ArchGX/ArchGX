@@ -1,5 +1,13 @@
 # Changelog
 
+## GP2-beta2: game options for SuperGrafx and System Card dumps
+
+Hardware test of GP2-beta1: SuperGrafx games and a CD game (Sylphia, .cue) ran at full speed. System Card and SuperGrafx carts were dumped as unknown HuCards, because the reader dumps 1 MB whatever the card holds.
+
+- **Game options (SELECT):** **Mark as SuperGrafx** / **Mark as HuCard** changes only the file extension, so saves, title and recent order stay. **Use as CD System Card** saves the first 256 KB to `bios/` (named after the card when its checksum is known, else `syscard3.pce`) and removes the dump from the library.
+- **Better detection:** cart dumps are also checked by the checksum of their first 256 KB and 512 KB, so oversized System Card and SuperGrafx dumps are recognised. Both checksums are logged to help grow the database.
+- Footer hint now reads "SELECT  Game options".
+
 ## GP2-beta1: SuperGrafx and CD games (beta)
 
 **New**

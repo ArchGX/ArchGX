@@ -414,7 +414,17 @@ play_cart() {
 	title=$(db_title "$crc" "$hdr")
 	if [ -n "$title" ]; then log "cart: identified as \"$title\" (crc32 $crc, header $hdr)"
 	else log "cart: not in the game database (crc32 $crc, header $hdr)"; fi
+	# The reader may dump more than the card holds (a System Card's RAM area
+	# reads as noise), so also try the checksum of the first 256 KB / 512 KB.
+	sz=$(stat -c %s $TMP/cart.pce); crc256=""; crc512=""
+	[ "$sz" -gt 262144 ] && { head -c 262144 $TMP/cart.pce > $TMP/pfx; crc256=$(crc32_of $TMP/pfx); }
+	[ "$sz" -gt 524288 ] && { head -c 524288 $TMP/cart.pce > $TMP/pfx; crc512=$(crc32_of $TMP/pfx); }
+	rm -f $TMP/pfx
+	[ -n "$crc256" ] && log "cart: first 256 KB crc32 $crc256${crc512:+, first 512 KB crc32 $crc512}"
 	sc=$(syscard_file "$crc")
+	if [ -z "$sc" ] && [ -n "$crc256" ] && [ -n "$(syscard_file "$crc256")" ]; then
+		sc=$(syscard_file "$crc256"); head -c 262144 $TMP/cart.pce > $TMP/cart.trim && mv $TMP/cart.trim $TMP/cart.pce
+	fi
 	if [ -n "$sc" ]; then                          # a System Card: keep it as the CD BIOS
 		mkdir -p "$BIOS_DIR"
 		if cp $TMP/cart.pce "$BIOS_DIR/$sc.part" && mv "$BIOS_DIR/$sc.part" "$BIOS_DIR/$sc" && sync; then
@@ -427,7 +437,7 @@ play_cart() {
 		return
 	fi
 	status "Preparing game..." "${title:-Unknown HuCard ($crc)}" "-" ""
-	ext=pce; case " $SGX_CRCS " in *" $crc "*) ext=sgx ;; esac   # SuperGrafx HuCard
+	ext=pce; case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) ext=sgx ;; esac   # SuperGrafx HuCard
 	s=$(stat -c %s $TMP/cart.pce); game=""
 	for f in "$GAMES"/*.pce "$GAMES"/*.sgx; do             # same game already in the library?
 		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }

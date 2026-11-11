@@ -56,7 +56,7 @@
 
 enum { K_HUCARD, K_SGX, K_CD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta1"
+#define ARCHGX_VERSION "GP2-beta2"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -64,7 +64,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
 static Game games[MAX_GAMES];
 static int ngames;          /* list entries, including the restart entry */
 static int nreal;           /* actual games */
-static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512];
+static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512], bios_dir[512];
 
 /* ------------------------------------------------------------- titles */
 /* titles.txt: "file<TAB>title" lines; the last entry for a file wins.
@@ -432,6 +432,114 @@ static int rename_game(int idx, const char *newname, char *newpath, size_t np)
     return 0;
 }
 
+/* SELECT menu entries for a game, by kind */
+enum { OP_RENAME, OP_SGX, OP_HUCARD, OP_BIOS, OP_DELETE, OP_CANCEL };
+static int game_ops(int kind, int ops[6], const char *names[6])
+{
+    int n = 0;
+    ops[n] = OP_RENAME; names[n++] = "Rename";
+    if (kind == K_HUCARD) {
+        ops[n] = OP_SGX;  names[n++] = "Mark as SuperGrafx";
+        ops[n] = OP_BIOS; names[n++] = "Use as CD System Card";
+    } else if (kind == K_SGX) {
+        ops[n] = OP_HUCARD; names[n++] = "Mark as HuCard";
+    }
+    ops[n] = OP_DELETE; names[n++] = "Delete";
+    ops[n] = OP_CANCEL; names[n++] = "Cancel";
+    return n;
+}
+
+/* rewrite recent.txt with one file name replaced (or removed: to == NULL) */
+static void recent_rename(const char *from, const char *to)
+{
+    char tmp[600], line[512];
+    FILE *in = fopen(recent_path, "r"), *out;
+    if (!in) return;
+    snprintf(tmp, sizeof tmp, "%s.new", recent_path);
+    if (!(out = fopen(tmp, "w"))) { fclose(in); return; }
+    while (fgets(line, sizeof line, in)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, from)) { if (to) fprintf(out, "%s\n", to); }
+        else if (*line) fprintf(out, "%s\n", line);
+    }
+    fclose(in); fclose(out);
+    rename(tmp, recent_path);
+}
+
+/* Mark a HuCard as SuperGrafx (.pce -> .sgx) or back. Only the extension
+ * changes, so saves (named without it) stay matched; title and recent follow. */
+static int set_kind(int idx, int to_sgx, char *newpath, size_t np)
+{
+    const char *path = games[idx].path, *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    const char *dot = strrchr(file, '.');
+    char newfile[512];
+    FILE *f;
+    if (!dot) return -1;
+    snprintf(newfile, sizeof newfile, "%.*s%s", (int)(dot - file), file, to_sgx ? ".sgx" : ".pce");
+    snprintf(newpath, np, "%.*s%s", (int)(file - path), path, newfile);
+    if (exists(newpath)) return -1;
+    if (rename(path, newpath) != 0) return -1;
+    if ((f = fopen(titles_path, "a"))) {         /* keep the name shown */
+        fprintf(f, "%s\t%s\n", newfile, games[idx].label);
+        fclose(f);
+    }
+    recent_rename(file, newfile);
+    sync();
+    SDL_Log("kind: %s -> %s", file, newfile);
+    return 0;
+}
+
+static unsigned long crc32_buf(const unsigned char *p, size_t n)
+{
+    unsigned long c = 0xffffffffUL;
+    int k;
+    while (n--) { c ^= *p++; for (k = 0; k < 8; k++) c = c & 1 ? (c >> 1) ^ 0xedb88320UL : c >> 1; }
+    return c ^ 0xffffffffUL;
+}
+
+/* Use a dump as the CD BIOS: its first 256 KB (a System Card's whole ROM;
+ * the reader may dump more) go to bios/, named after the card when its
+ * checksum is known, else syscard3.pce (the name the cores try first).
+ * The dump then leaves the library. */
+static int use_as_bios(int idx, char *out, size_t on)
+{
+    static const struct { unsigned long crc; const char *name; } known[] = {
+        { 0x6d9a73efUL, "syscard3.pce" }, { 0x2b5b75feUL, "syscard3u.pce" },
+        { 0x52520bc6UL, "syscard2.pce" }, { 0x283b74e0UL, "syscard2.pce" },
+        { 0xff2a5ec3UL, "syscard2u.pce" }, { 0x3f9f95a4UL, "syscard1.pce" },
+        { 0x51a12d90UL, "gexpress.pce" } };
+    const char *name = "syscard3.pce";
+    unsigned char *buf = malloc(262144);
+    char dst[600], part[640];
+    size_t n;
+    unsigned long c;
+    unsigned i;
+    FILE *in, *o;
+    if (!buf) return -1;
+    if (!(in = fopen(games[idx].path, "rb"))) { free(buf); return -1; }
+    n = fread(buf, 1, 262144, in);
+    fclose(in);
+    if (n < 8192) { free(buf); return -1; }
+    c = crc32_buf(buf, n);
+    for (i = 0; i < sizeof known / sizeof known[0]; i++) if (known[i].crc == c) name = known[i].name;
+    mkdir(bios_dir, 0755);
+    snprintf(dst, sizeof dst, "%s/%s", bios_dir, name);
+    snprintf(part, sizeof part, "%s.part", dst);
+    if (!(o = fopen(part, "wb"))) { free(buf); return -1; }
+    if (fwrite(buf, 1, n, o) != n) { fclose(o); unlink(part); free(buf); return -1; }
+    free(buf);
+    if (fclose(o) != 0 || rename(part, dst) != 0) { unlink(part); return -1; }
+    {   /* out of the library */
+        const char *file = strrchr(games[idx].path, '/') ? strrchr(games[idx].path, '/') + 1 : games[idx].path;
+        recent_rename(file, NULL);
+        unlink(games[idx].path);
+    }
+    sync();
+    snprintf(out, on, "%s", name);
+    SDL_Log("bios: %s -> %s (crc32 %08lx, %lu bytes)", games[idx].path, dst, c, (unsigned long)n);
+    return 0;
+}
+
 /* --------------------------------------------------------- controllers */
 
 typedef struct { int a, b, start, select; } PadMap;
@@ -745,6 +853,7 @@ static const char *kb_special[] = { "abc", "Space", "Del", "Clear", "Done", "Can
 /* ---------------------------------------------------------------- main */
 
 enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT };
+static const char *opnames[6];
 
 /* ------------------------------------------------------ in-game menu */
 /* pce-launcher --ingame <command-fifo> <card-save-base> [title]
@@ -1573,6 +1682,7 @@ int main(int argc, char **argv)
     snprintf(titles_path, sizeof titles_path, "%.*stitles.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(localdb_path, sizeof localdb_path, "%.*sgamedb-local.csv", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(recent_path, sizeof recent_path, "%.*srecent.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(bios_dir, sizeof bios_dir, "%.*sbios", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(saves_dir, sizeof saves_dir, "%.*ssaves", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     cart0 = (status_mode || ingame_mode) ? 0 : cart_state();
 
@@ -1709,16 +1819,33 @@ int main(int argc, char **argv)
                     _exit(0);
                 }
             } else if (mode == M_OPTIONS) {
+                int ops[6], nops = game_ops(games[sel].kind, ops, (const char **)opnames);
                 if (a == A_UP && opt > 0) opt--;
-                else if (a == A_DOWN && opt < 2) opt++;
-                else if (a == A_BACK || a == A_SELECT || (a == A_OK && opt == 2)) mode = M_LIST;
+                else if (a == A_DOWN && opt < nops - 1) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && ops[opt] == OP_CANCEL)) mode = M_LIST;
                 else if (a == A_OK || a == A_RUN) {
-                    if (opt == 0) {
+                    char lab[NAME_MAX_LEN * 2], np[1024], bn[64];
+                    snprintf(lab, sizeof lab, "%s", games[sel].label);
+                    if (ops[opt] == OP_RENAME) {
                         mode = M_KEYBOARD; kb_r = 0; kb_c = 0; kb_lower = 0;
                         snprintf(kb_text, sizeof kb_text, "%s",
                                  strncmp(games[sel].label, "Unknown HuCard", 14) ? games[sel].label : "");
-                    } else if (opt == 1) {
+                    } else if (ops[opt] == OP_DELETE) {
                         mode = M_DELETE; opt = 1;   /* default: No */
+                    } else if (ops[opt] == OP_SGX || ops[opt] == OP_HUCARD) {
+                        int to = ops[opt] == OP_SGX;
+                        if (set_kind(sel, to, np, sizeof np) == 0) {
+                            snprintf(msg, sizeof msg, to ? "\"%s\" will run as SuperGrafx" : "\"%s\" will run as a HuCard", lab);
+                            scan_library();
+                            if ((i = find_game(np)) >= 0) sel = i;
+                        } else snprintf(msg, sizeof msg, "Could not change \"%s\"", lab);
+                        mode = M_MESSAGE; msg_until = now + 2500;
+                    } else if (ops[opt] == OP_BIOS) {
+                        if (use_as_bios(sel, bn, sizeof bn) == 0) snprintf(msg, sizeof msg, "Saved as CD System Card (bios/%s)", bn);
+                        else snprintf(msg, sizeof msg, "Could not save \"%s\" as a System Card", lab);
+                        scan_library();
+                        if (sel >= ngames) sel = ngames - 1;
+                        mode = M_MESSAGE; msg_until = now + 3000;
                     }
                 }
             } else if (mode == M_DELETE) {
@@ -1853,7 +1980,7 @@ int main(int argc, char **argv)
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"
                                    : "I / RUN  Restart the console")
-                                  : "I / RUN  Play       SELECT  Rename / Delete       Left/Right  Page",
+                                  : "I / RUN  Play       SELECT  Game options       Left/Right  Page",
              dim, W / 2, H * 91 / 100, 1);
 
         if (mode == M_ABOUT) draw_about();
@@ -1868,14 +1995,14 @@ int main(int argc, char **argv)
                 text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
             }
         } else if (mode == M_OPTIONS) {
-            static const char *items[] = { "Rename", "Delete", "Cancel" };
-            int pw = W * 40 / 100, ph = row_h * 5, px, py;
+            int ops[6], nops = game_ops(games[sel].kind, ops, (const char **)opnames);
+            int pw = W * 46 / 100, ph = row_h * (nops + 2), px, py;
             panel(pw, ph, &px, &py);
             text(f_hint, games[sel].label, dim, px + pw / 2, py + row_h / 3, 1);
-            for (i = 0; i < 3; i++) {
+            for (i = 0; i < nops; i++) {
                 int y = py + row_h * (i + 1) + row_h / 4;
                 if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
-                text(f_item, items[i], i == 1 ? red : white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+                text(f_item, opnames[i], ops[i] == OP_DELETE ? red : white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
             }
         } else if (mode == M_DELETE) {
             int pw = W * 60 / 100, ph = row_h * 9 / 2, px, py, bw = pw / 4;
