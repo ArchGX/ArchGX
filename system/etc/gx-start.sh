@@ -461,6 +461,30 @@ play_cart() {
 	touch $TMP/cart_game; run_game "$game"; rm -f $TMP/cart_game
 }
 
+# "Play the CD in the drive": copy a disc from a USB CD drive into games/
+# (cd-rip: progress on the status screen), then play it. A disc copied before
+# is recognised by its table of contents and played straight away.
+CD_DEV=/dev/sr0
+rip_cd() {
+	status_show "Reading the CD..." "" "-"
+	out=$(/usr/bin/cd-rip $CD_DEV "$GAMES" $TMP/status 2>> "$LOG"); rc=$?
+	case $rc in
+	0|4)	cue=$(echo "$out" | tail -1)
+		id=$(basename "$cue" .cue); id=${id#cd-}
+		awk -F '\t' -v f="$(basename "$cue")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null ||
+			set_title "$cue" "Unknown CD ($id)"         # Rename gives it a name
+		log "cd: $cue (cd-rip exit $rc)"
+		if [ $rc = 4 ]; then
+			status_show "CD copied, but some sectors could not be read" "Clean the disc and copy it again if the game misbehaves" "" error; sleep 4
+		fi
+		status_close
+		run_game "$cue" ;;
+	2)	show_error "No disc in the drive" "Insert a PC Engine CD and try again" ;;
+	3)	sleep 3; status_close ;;                     # cd-rip showed "Not enough space"
+	*)	show_error "Could not copy the CD" "See logs/gx-start.log" ;;
+	esac
+}
+
 # ---------------------------------------------------------------- main
 mkdir -p $TMP
 [ -x /etc/fix_storage.sh ] && /etc/fix_storage.sh      # our storage-partition fix
@@ -553,6 +577,7 @@ while :; do
 	0:__CART__|2:*)   play_cart; fails=0 ;;
 	0:__RESTART__)    log "restart requested"; sync; reboot; exit 0 ;;
 	0:__RETROARCH__)  run_retroarch_menu; fails=0 ;;
+	0:__RIPCD__)      rip_cd; fails=0 ;;
 	0:?*)             run_game "$choice" "$how"; fails=0 ;;
 	*)              fails=$((fails+1)); log "picker exited ($rc)"; ensure_display
 	                [ $fails -ge 5 ] && { log "picker keeps failing, waiting 10 s"; sleep 10; fails=0; } ;;

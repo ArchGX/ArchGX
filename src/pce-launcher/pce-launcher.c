@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <time.h>
 
 #define MAX_GAMES 4096
@@ -56,7 +57,7 @@
 
 enum { K_HUCARD, K_SGX, K_CD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta4"
+#define ARCHGX_VERSION "GP2-beta5"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -290,6 +291,25 @@ static void free_games(void)
     ngames = nreal = 0;
 }
 
+/* a disc in a USB CD drive (/dev/sr0)? */
+#include <limits.h>
+#include <linux/cdrom.h>
+static int cd_present;
+static int cd_check(void)
+{
+    const char *dev = getenv("PCE_LAUNCHER_CD") ? getenv("PCE_LAUNCHER_CD") : "/dev/sr0";   /* test hook */
+    int fd = open(dev, O_RDONLY | O_NONBLOCK), now;
+    if (fd < 0) now = 0;
+    else {
+        now = getenv("PCE_LAUNCHER_CD") ? 1 : ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+        close(fd);
+    }
+    if (now == cd_present) return 0;
+    cd_present = now;
+    SDL_Log("cd drive: %s", now ? "disc inserted" : "no disc");
+    return 1;
+}
+
 static void scan_library(void)
 {
     free_games();
@@ -297,6 +317,12 @@ static void scan_library(void)
     scan_dir(lib_dir, 0);
     qsort(games, ngames, sizeof(Game), cmp_games);
     nreal = ngames;
+    if (cd_present) {                        /* a disc in a USB CD drive */
+        games[ngames].path = strdup("__RIPCD__");
+        games[ngames].label = strdup("Play the CD in the drive");
+        games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
+        ngames++;
+    }
     if (getenv("PCE_LAUNCHER_CART")) {      /* a HuCard is sitting in the slot */
         games[ngames].path = strdup("__CART__");
         games[ngames].label = strdup("Play the HuCard in the slot");
@@ -1786,6 +1812,7 @@ int main(int argc, char **argv)
     load_brand();
     if (status_mode) return run_status(argv[2], bg, shot);
 
+    cd_check();
     scan_library();
     SDL_Log("screen %dx%d, %d games, data dir %s", W, H, nreal, data_dir);
     for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
@@ -1902,7 +1929,7 @@ int main(int argc, char **argv)
                     if (ops[opt] == OP_RENAME) {
                         mode = M_KEYBOARD; kb_r = 0; kb_c = 0; kb_lower = 0;
                         snprintf(kb_text, sizeof kb_text, "%s",
-                                 strncmp(games[sel].label, "Unknown HuCard", 14) ? games[sel].label : "");
+                                 strncmp(games[sel].label, "Unknown ", 8) ? games[sel].label : "");
                     } else if (ops[opt] == OP_DELETE) {
                         mode = M_DELETE; opt = 1;   /* default: No */
                     } else if (ops[opt] == OP_SGX || ops[opt] == OP_HUCARD) {
@@ -1980,7 +2007,18 @@ int main(int argc, char **argv)
         if (mode == M_MESSAGE && now >= msg_until && !shot) { mode = M_LIST; dirty = 1; }
         {   /* hardware check every 2 s */
             static Uint32 hw_next;
-            if (now >= hw_next) { hw_next = now + 2000; if (hw_check()) dirty = 1; }
+            if (now >= hw_next) {
+                hw_next = now + 2000;
+                if (hw_check()) dirty = 1;
+                if (cd_check()) {                /* disc in or out: list it */
+                    char keep[1024];
+                    snprintf(keep, sizeof keep, "%s", sel < ngames ? games[sel].path : "");
+                    scan_library();
+                    for (i = 0; i < ngames; i++) if (!strcmp(games[i].path, keep)) { sel = i; break; }
+                    if (sel >= ngames) sel = ngames - 1;
+                    dirty = 1;
+                }
+            }
         }
 
         if (now - last_cart > 500) {
@@ -2053,6 +2091,7 @@ int main(int argc, char **argv)
             fill(list_x + list_w + W / 40, bar_y, W / 320 + 1, bar_h, accent.r, accent.g, accent.b, 255);
         }
         text(f_hint, sel >= nreal ? (!strcmp(games[sel].path, "__CART__") ? "I / RUN  Play the HuCard that is in the slot"
+                                   : !strcmp(games[sel].path, "__RIPCD__") ? "I / RUN  Copy the CD to the SD card (first time only) and play it"
                                    : !strcmp(games[sel].path, "__PADTEST__") ? "I / RUN  Check that every button works"
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"

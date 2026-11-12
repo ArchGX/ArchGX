@@ -46,6 +46,10 @@ echo "== pce-normalize"
 $CC $CFLAGS -o "$OUT/obj/pce-normalize" "$TOP/src/pce-normalize/pce-normalize.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
 $STRIP -o "$PAY/usr/bin/pce-normalize" "$OUT/obj/pce-normalize"
 
+echo "== cd-rip"
+$CC $CFLAGS -o "$OUT/obj/cd-rip" "$TOP/src/cd-rip/cd-rip.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
+$STRIP -o "$PAY/usr/bin/cd-rip" "$OUT/obj/cd-rip"
+
 echo "== RetroArch $RA_TAG + ArchGX patch"
 RA=${RA_SRC:-$OUT/RetroArch}
 if [ -z "${RA_SRC:-}" ]; then

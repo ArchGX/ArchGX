@@ -1,5 +1,11 @@
 # Changelog
 
+## GP2-beta5: copy CDs from a USB CD drive
+
+- New `cd-rip`: with a USB CD drive in a front port and a disc inserted, **Play the CD in the drive** appears in the library. The first time it copies the disc to `games/cd-<id>/` (one `.bin` per track plus a `.cue`, raw 2352-byte sectors), with a progress bar showing the track, speed and time left, then plays it. A disc copied before is recognised by its table of contents and plays straight away.
+- Bad reads are retried (chunk twice, then sector by sector three times); unreadable sectors are zero-filled and reported. Drives that refuse raw data reads fall back to 2048-byte data sectors. Copying happens in a hidden folder, so an interrupted copy never shows up in the library. Free space is checked first.
+- Copied discs are named "Unknown CD (id)"; Rename starts with an empty name for any "Unknown ..." game.
+
 ## GP2-beta4: hardware check on screen
 
 - 20 seconds after power-on, the library checks for the cart reader (2e25:988c) and the front USB ports (hub 1a40:0101) every 2 seconds. If one is missing, a red line under the list says so ("Cart reader not found: HuCards and the controller ports won't work", "Front USB ports not found", or "Cart reader is in update mode: restart the console"). It clears by itself when the device comes back.

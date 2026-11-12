@@ -59,6 +59,8 @@ Copy CD games into `games/`, either loose or one folder per game (one folder lev
 
 CD games need a **System Card** image in the card's `bios/` folder. Either insert your System Card (it is saved automatically) or copy a dump named `syscard3.pce` (Super CD-ROM² 3.0), `syscard3u.pce` (TurboGrafx Super System Card), `syscard2.pce`, `syscard2u.pce` or `syscard1.pce`. The best one present is used, in that order. ArchGX doesn't include any BIOS files.
 
+**Copying your own discs:** plug a USB CD drive into a front USB port (use a drive with its own power supply) and insert a disc. **Play the CD in the drive** appears in the library. The first time, the disc is copied to `games/cd-<id>/` with a progress bar (a few minutes), then it starts. After that the same disc plays from the SD card straight away. A copied disc shows as "Unknown CD (id)": use **Rename** to name it. If some sectors can't be read, you're told: clean the disc, delete the copy and copy it again.
+
 Deleting a CD game removes its tracks too, and its folder once empty. Saves, save states and rewind work as for HuCards.
 
 ## The in-game menu
