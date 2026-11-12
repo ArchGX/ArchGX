@@ -7,29 +7,52 @@ ArchGX aims to be an **easy console**:
 - simple settings;
 - RetroArch's full power still there for those who want it.
 
-## Now: GP1
+## Done: GP1
 
 The first public build: library, HuCards, the in-game menu with save slots, rewind and options, an installer that patches your own card. See the [Changelog](CHANGELOG.md).
 
-## Next: GP2 (candidates)
+## Now: GP2 (in beta, GP2-beta9)
+
+Done in the betas: SuperGrafx and CD games, System Cards as BIOS, copying CDs from a USB drive, verified HuCard reads and bad-read handling, standard dumps from flash carts, library colours (verified / modified / unknown), composite colours, autosave, dropped-frame logging, a hidden Debug screen. Details in the [Changelog](CHANGELOG.md).
+
+Still to do before GP2 is released:
 
 | Item | Why |
 |---|---|
-| **SuperGrafx and CD games** | In beta as GP2-beta1: needs hardware testing for speed |
-| **Bad-read detection** | Recognise garbage or nearly-correct HuCard reads (one bit off a known game's header) and ask for a reinsert instead of adding an unknown cart |
-| **Four players** | Up to 4 pads (2 controller ports + 2 USB) for games like Dungeon Explorer; per-game input settings where a game needs them |
+| **Hardware test of beta8/beta9** | CD copy speed, cancel, skipping damaged areas, library colours |
+| **USB import and export** | Copy games, saves, BIOS files and patches from a USB stick; export the games and saves folders to one |
+| **Folders** | Make folders and move games into them (one level) |
+| **Patcher** | Apply IPS/BPS patches (hacks, translations) to a game; the result is a new game, the original stays |
+| **Game database submissions** | Guide and GitHub issue form for sharing `gamedb-local.csv` and `cddb-local.csv` entries |
+
+## Next (candidates)
+
+| Item | Why |
+|---|---|
+| **Website** | Downloads, guide, compatibility list, database submissions (static, GitHub Pages) |
+| **Shadow mask and sharp scaling** | Requested by players; off by default, measured for speed first |
+| **Four players** | Up to 4 pads (2 controller ports + 2 USB) for games like Dungeon Explorer |
 | **Screenshot viewer** | Browse `screenshots/` from the library |
-| **Fine rewind** | After jumping to a snapshot, step back frame by frame using RetroArch's rewind buffer |
+| **Fine rewind** | After jumping to a snapshot, step back frame by frame |
 | **Faster start** | Our own init script without the stock bad-block scan at every boot |
+| **RetroArch exit crash** | RetroArch crashes (exit 139) after saving when a game closes: harmless, but worth finding |
 
 ## Later
 
 | Item | Notes |
 |---|---|
+| **RetroArch 1.8 or newer: investigate** | Physical CD support arrived in 1.8. Check speed on the Mali driver, the size of porting our patch, and whether **playing straight from the USB CD drive** is practical (seek times, drive noise) |
 | **Beetle PCE Fast from upstream source** | Replace the manufacturer's modified core with one built from public source |
-| **Newer RetroArch** | Move beyond 1.7.4 if it stays fast on the Mali driver |
-| **More cart and game data** | Grow the game database from community submissions ([how to contribute](docs/GAMEDB.md)) |
+| **More cart and game data** | Grow the game and CD databases from community submissions ([how to contribute](docs/GAMEDB.md)) |
 | **Fully open system image** | Kernel and U-Boot from Rockchip's public sources. Research only: the DDR init blob would still be Rockchip's |
+
+## Parked (hardware research)
+
+| Item | Notes |
+|---|---|
+| **HuCard flasher** | Write AM29F080 flash HuCards. Best route: a small RP2350-based USB flasher, not the stock reader |
+| **Cart reader firmware** | Probe the reader's microcontroller (SWD pads) to learn its protocol; the prototype's reader needs recovery |
+| **Upgrade PCB** | Feasibility done: not needed for SuperGrafx or CD |
 
 ## Not planned
 
