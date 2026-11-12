@@ -43,7 +43,9 @@ Insert a HuCard and ArchGX takes over:
 - A cart that's already in the library isn't stored twice.
 - Pulling the cart during a game saves its battery memory and returns to the library.
 - **Unknown carts** (homebrew, repros, prototypes) show as "Unknown HuCard (checksum)". Rename them to give them a name.
-- **Bad reads:** dirty contacts can produce a wrong read, which shows up as an unknown cart. Delete it, clean the cart and reinsert it.
+- **Colours in the library:** green = matches the game database, amber ("Modified?") = a known game with a different checksum (a hack, a revision or a bad read: clean the cart and insert it again to check), grey = not in the database.
+- **Bad reads:** a cart that reads differently every time isn't added. Clean its contacts and insert it again.
+- **Debug screen:** hold SELECT for 3 seconds on About.
 
 ArchGX mounts the reader read-only and never sends it commands.
 

@@ -88,7 +88,7 @@ crc32,header,title,region,notes
 0x9107bcc8,0x008d9a2dad9b2d69,Dai Senpu,,
 0x61a2935f,0x5310a90a53208a20,Daichi Kun Crisis - Do Natural,,
 0xb0ba689f,0x8d00004304484308,Darius Alpha,,
-0xbebfe042,,Darius Plus (Super Grafx-compatible),,
+0xbebfe042,0x8d00004304484308,Darius Plus (Super Grafx-compatible),,
 0x4ac97606,0x048d04049c0504ea,Darkwing Duck,,
 0x9edab596,0x00002920f0f96860,Davis Cup Tennis,,
 0x56739bc7,0x0000000000000000,Dead Moon,,
@@ -471,3 +471,10 @@ crc32,header,title,region,notes
 0x543dddf1,0xe0a9002029f6a929,Maison Ikkoku (English v1.01),,huconv conversion; fan translation
 0xf64d75ab,0xaa2093e8201de120,Shiryou Sensen - War of the Dead (English v1.0),,huconv conversion; fan translation
 0x852c8165,0x2982c2bd00228d05,The Tower of Druaga (English v1.1),,huconv conversion; fan translation
+0x86c295a0,0xa9068d0000ad1922,Dai Makaimura - Improvement Hack (Super Grafx),,hack; SuperGrafx
+0x529e58d7,0x8d00004304484308,Darius Alpha - SG Enhanced,,hack
+0xe8b13afc,0x8d00004304484308,Darius Plus - SG Enhanced,,hack
+0x91be0dec,0x03080a0c0e06080a,Die Hard (English v1.0),,fan translation
+0x334300b3,0xc634f01da5301869,Dinoforce,Japan,
+0x1d25d78a,0x0300a5b320f9ee20,Gunhed (768 KB variant),,variant
+0x9710c85c,0x0300a5b320f9ee20,Gunhed FX1,,hack

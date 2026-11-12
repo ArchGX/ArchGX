@@ -142,7 +142,7 @@ set_core_defaults() {
 
 # What a library file is: hucard, sgx or cd. SuperGrafx HuCards are known by
 # their .sgx name or their CRC32 (the core's own list plus our gamedb).
-SGX_CRCS="8c4588e2 d206e241 4c2126b0 3b13af61 b486a8ed 1f041166 bebfe042"
+SGX_CRCS="8c4588e2 d206e241 4c2126b0 3b13af61 b486a8ed 1f041166 bebfe042 86c295a0"
 game_kind() {
 	case "$1" in
 	*.[cC][uU][eE]|*.[cC][hH][dD]|*.[cC][cC][dD]|*.[mM]3[uU]|*.[tT][oO][cC]) echo cd ;;
@@ -282,6 +282,9 @@ persist_ra() {
 
 # Options-menu settings -> RetroArch config for this launch (+ /tmp/gx/ra-set for
 # the turbo buttons). The front switch wins if it moved since the last change.
+# Debug screen (hidden: hold SELECT on About): debug.cfg, written by the picker
+DEBUG_CFG=$ROM/debug.cfg
+debug_opt() { v=$(sed -n "s/^$1=//p" "$DEBUG_CFG" 2>/dev/null | tr -d '\r' | tail -1); echo "${v:-$2}"; }
 setting() { v=$(sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tr -d '\r' | tail -1); echo "${v:-$2}"; }
 apply_settings() {
 	aspect=$(setting aspect ""); sw=$(setting switch -1)
@@ -308,7 +311,13 @@ apply_settings() {
 		video_filter = "$filt"
 		video_smooth = "$sm"
 		audio_volume = "$db"
+		autosave_interval = "60"
 	EOC
+	# autosave: RetroArch writes battery saves (CD backup RAM) every minute from
+	# its own thread; run_game flushes them to the card. Debug: FPS counter.
+	if [ "$(debug_opt fps 0)" = 1 ]; then
+		printf 'fps_show = "true"\nvideo_font_enable = "true"\n' >> $GX_SET_CFG
+	fi
 	[ "$(setting flicker 0)" = 1 ] && spr=enabled || spr=disabled
 	core_opt pce_nospritelimit "$spr"; core_opt sgx_nospritelimit "$spr"
 	[ "$(setting palette 0)" = 1 ] && pal=Composite || pal=RGB
@@ -377,13 +386,32 @@ run_game() {
 		/usr/bin/pce-launcher --ingame $RA_FIFO "$SAVES/$base" "$title" >> $LOGD/ingame.log 2>&1 &
 		ig=$!
 	fi
+	# power can be cut at any moment: flush autosaves to the card every minute
+	( while sleep 60; do sync; done ) & syncer=$!
+	[ "$(debug_opt usbpause 1)" = 1 ] && touch $TMP/usb_pause    # the USB log waits while a game runs
 	wait $ra; rc=$?
+	kill $syncer 2>/dev/null; rm -f $TMP/usb_pause; sync
 	[ -n "$ig" ] && kill $ig 2>/dev/null
 	exec 3>&-; rm -f $RA_FIFO
 	rm -f $STATES_TMP/*; persist_ra
 	log "game ended (retroarch exit $rc)"
+	session_stats "$title" $rc
 	ensure_display
 	[ -z "$started" ] && show_error "Could not start $title" "See logs/retroarch.log"
+}
+
+# dropped frames (RetroArch prints them when it closes): one line per game in
+# gx-start.log, and logs/last-session.txt for the Debug screen
+session_stats() {
+	fr=$(grep -a "Threaded video stats" $LOGD/retroarch.log 2>/dev/null | tail -1 |
+		sed -n 's/.*pushed: *\([0-9]*\).*dropped: *\([0-9]*\).*/\1 \2/p')
+	set -- "$1" "$2" $fr
+	case $2 in 0) ex="clean" ;; 139) ex="crashed while closing (139)" ;; *) ex="exit code $2" ;; esac
+	if [ -n "$3" ] && [ "$3" -gt 0 ]; then
+		pm=$(( $4 * 1000 / $3 )); fs="$4 of $3 frames dropped ($((pm / 10)).$((pm % 10))%)"
+	else fs="no frame count"; fi
+	log "frames: $fs"
+	printf '%s\n%s\n%s\n' "$1" "$fs" "$ex" > $LOGD/last-session.txt
 }
 
 # "RetroArch (advanced)" in the picker: the full RetroArch menu, no game loaded
@@ -412,9 +440,36 @@ crc_known() {
 		grep -q -E "^(0x)?0*$(echo "$1" | sed 's/^0*//')[,;]"
 }
 
+# A cart that isn't an exact database match may still be a known game in a
+# non-standard form: a smaller game in a bigger read (a 768 KB game reads as
+# 1 MB; flash carts hold leftovers after the game) or a region-free patch
+# (huconv.py and others). Try those forms; the first known checksum becomes
+# the dump, so saved games are standard ROMs.
+std_form() {
+	sz=$(stat -c %s $TMP/cart.pce)
+	for len in $sz 786432 524288 393216 262144; do
+		[ "$len" -le "$sz" ] || continue
+		head -c "$len" $TMP/cart.pce > $TMP/std
+		for v in - f0 d0; do
+			[ "$len" = "$sz" ] && [ $v = - ] && continue          # already checked
+			if [ $v = - ]; then cp $TMP/std $TMP/std2
+			else pce-normalize --unregion $TMP/std $TMP/std2 $v 2>/dev/null || continue; fi
+			k=$(crc32_of $TMP/std2)
+			if crc_known "$k"; then
+				mv $TMP/std2 $TMP/cart.pce; rm -f $TMP/std
+				r=""; [ $v = - ] || r=", region byte $v"
+				log "cart: standard form found ($len bytes$r) crc32 $k"
+				crc=$k; return 0
+			fi
+		done
+	done
+	rm -f $TMP/std $TMP/std2; return 1
+}
+
 # identify $TMP/cart.pce: sets crc hdr title crc256 crc512 sc
 identify() {
 	crc=$(crc32_of $TMP/cart.pce); hdr=$(header_of $TMP/raw.pce)
+	crc_known "$crc" || std_form
 	title=$(db_title "$crc" "$hdr")
 	# The reader may dump more than the card holds (a System Card's RAM area
 	# reads as noise), so also try the checksum of the first 256 KB / 512 KB.
@@ -429,12 +484,41 @@ normalize() { pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP
 
 ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
 
-# read-check.txt: "file<TAB>state" (last line wins). state: unstable = the reads
-# differed; mismatch = the header names a known game but the checksum isn't
-# that game's; ok = fine. The picker marks the first two "Bad read?".
+# read-check.txt: "file<TAB>state<TAB>crc32" (last line wins), one line per
+# HuCard in the library. state: ok = matches the game database (green in the
+# picker); mismatch = the header names a known game but the checksum differs:
+# a hack, a revision or a bad read (yellow); unknown = not in the database
+# (grey). Lines from beta7 have no checksum and are checked again.
 READCHECK=$ROM/read-check.txt
 readcheck_of() { awk -F '\t' -v f="$(basename "$1")" '$1 == f { s = $2 } END { print s }' "$READCHECK" 2>/dev/null; }
-readcheck_set() { printf '%s\t%s\n' "$(basename "$1")" "$2" >> "$READCHECK"; }
+readcheck_set() { printf '%s\t%s\t%s\n' "$(basename "$1")" "$2" "$3" >> "$READCHECK"; }
+
+# check every HuCard in the library that has no read-check line yet (games
+# copied from a computer, renamed ones, beta7 lines): only new files cost
+# time, and only here in the menu, never while a game runs
+verify_library() {
+	todo=$TMP/verify.todo
+	awk -F '\t' 'NF >= 3 { print $1 }' "$READCHECK" 2>/dev/null | sort -u > $TMP/verify.done
+	for f in "$GAMES"/*.pce "$GAMES"/*.sgx "$GAMES"/*/*.pce "$GAMES"/*/*.sgx; do
+		[ -f "$f" ] && echo "$f"
+	done | while read -r f; do grep -qxF "$(basename "$f")" $TMP/verify.done || echo "$f"; done > $todo
+	n=$(wc -l < $todo); i=0
+	[ "$n" -gt 0 ] || { rm -f $todo; return; }
+	[ "$n" -gt 2 ] && status_show "Checking new games..." "" 0 ""
+	while read -r f; do
+		i=$((i+1)); [ "$n" -gt 2 ] && status "Checking new games..." "$(basename "$f")" $((i * 100 / n)) ""
+		sz=$(stat -c %s "$f")
+		if [ $((sz % 1024)) = 512 ]; then tail -c +513 "$f" > $TMP/vf; else cp "$f" $TMP/vf; fi   # copier header
+		k=$(crc32_of $TMP/vf)
+		if crc_known "$k"; then st=ok
+		elif [ -n "$(db_title "$k" "$(header_of $TMP/vf)")" ]; then st=mismatch
+		else st=unknown; fi
+		readcheck_set "$f" $st $k
+	done < $todo
+	rm -f $todo $TMP/vf $TMP/verify.done; sync
+	log "library: checked $n new game file(s)"
+	[ "$n" -gt 2 ] && status_close
+}
 play_cart() {
 	status_show "Reading HuCard..." "" "-"          # the reader's own read: no progress visible
 	cart_ready 30 || { show_error "Could not read the HuCard" "Check the card and try again"; return; }
@@ -448,7 +532,7 @@ play_cart() {
 	# is read again; if the two reads differ, a third read settles every byte
 	# by majority vote.
 	sgxc=""; case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) sgxc=1 ;; esac
-	if [ -z "$sc" ] && [ -z "$sgxc" ] && ! crc_known "$crc"; then
+	if [ "$(debug_opt readtwice 0)" = 1 ] || { [ -z "$sc" ] && [ -z "$sgxc" ] && ! crc_known "$crc"; }; then
 		cp $TMP/raw.pce $TMP/raw1.pce
 		sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null   # read the cart again, not the cache
 		if copy_dump "$CART_FILE" $TMP/raw2.pce "Checking the read..."; then
@@ -459,7 +543,14 @@ play_cart() {
 				sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
 				if copy_dump "$CART_FILE" $TMP/raw3.pce "Checking the read again..."; then
 					pce-normalize --vote $TMP/raw1.pce $TMP/raw2.pce $TMP/raw3.pce $TMP/raw.pce >> "$LOG" 2>&1
-					[ $? -le 2 ] || cp $TMP/raw1.pce $TMP/raw.pce
+					v=$?
+					if [ $v = 2 ]; then          # some bytes differed all three times: not a usable read
+						rm -f $TMP/raw*.pce $TMP/cart.pce
+						log "cart: no clean read (bytes differed in all three reads): not added"
+						show_error "Couldn't get a clean read of this HuCard" "Clean its contacts, insert it again and retry"
+						return
+					fi
+					[ $v = 0 ] || cp $TMP/raw1.pce $TMP/raw.pce
 					unstable=1; normalize; identify
 				fi
 			fi
@@ -486,20 +577,24 @@ play_cart() {
 	case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) ext=sgx ;; esac   # SuperGrafx HuCard
 	case "$title" in *"Super Grafx)"*|*"(SGX)"*) ext=sgx ;; esac      # ... or named so in the database
 	s=$(stat -c %s $TMP/cart.pce); game=""
-	for f in "$GAMES"/*.pce "$GAMES"/*.sgx; do             # same game already in the library?
-		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
+	for f in "$GAMES"/*.pce "$GAMES"/*.sgx "$GAMES"/*/*.pce "$GAMES"/*/*.sgx; do   # same game already in the library?
+		[ -f "$f" ] || continue
+		fs=$(stat -c %s "$f")
+		if [ "$fs" = "$s" ]; then cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
+		elif [ "$fs" = $((s + 512)) ]; then tail -c +513 "$f" | cmp -s - $TMP/cart.pce && { game=$f; break; }   # copier header
+		fi
 	done
 	# how good is this read?
 	rstate=ok
-	[ -n "$title" ] && ! crc_known "$crc" && rstate=mismatch
-	[ -n "$unstable" ] && rstate=unstable
+	if ! crc_known "$crc"; then [ -n "$title" ] && rstate=mismatch || rstate=unknown; fi
+	[ -n "$unstable" ] && log "cart: the reads differed; the majority vote settled every byte"
 	# a copy of this game marked as a bad read is replaced by a good read
 	if [ -z "$game" ] && [ -n "$title" ] && [ $rstate = ok ]; then
 		for f in "$GAMES/$(safe_name "$title").pce" "$GAMES/$(safe_name "$title").sgx"; do
 			[ -f "$f" ] || continue
 			case "$(readcheck_of "$f")" in unstable|mismatch)
 				cp $TMP/cart.pce "$f.part" && mv "$f.part" "$f" && sync && {
-					readcheck_set "$f" ok; game=$f; log "cart: good read replaces the bad copy $(basename "$f")"; } ;;
+					readcheck_set "$f" ok $crc; game=$f; log "cart: good read replaces the bad copy $(basename "$f")"; } ;;
 			esac
 		done
 	fi
@@ -513,18 +608,18 @@ play_cart() {
 		fi
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
-		log "cart: new dump saved as $(basename "$game")"; new=1
-		[ $rstate = ok ] || { readcheck_set "$game" $rstate; log "cart: marked as a possible bad read ($rstate)"; }
+		log "cart: new dump saved as $(basename "$game") ($rstate)"; new=1
+		readcheck_set "$game" $rstate $crc
 	fi
 	rm -f $TMP/raw.pce
 	# show the database title unless the user already named this file
 	if [ -n "$title" ] && ! awk -F '\t' -v f="$(basename "$game")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
 		set_title "$game" "$title"
 	fi
-	case $rstate in
-	unstable) status_show "Bad read: this HuCard read differently each time" "Clean its contacts and insert it again. A good read replaces this copy" "" error; sleep 5 ;;
-	mismatch) status_show "Bad read? This doesn't match the known copy of $title" "Clean the HuCard's contacts and insert it again. A good read replaces this copy" "" error; sleep 5 ;;
-	esac
+	if [ $rstate = mismatch ] && [ -n "$new" ]; then
+		status_show "This doesn't match the known copy of $title" "It may be a hack, a revision or a bad read. Cleaning the contacts and inserting it again checks it" "" ""
+		sleep 4
+	fi
 	if [ -z "$title" ] && [ -n "$new" ] && [ "$ext" = pce ]; then
 		# unknown: let the player choose PC Engine, SuperGrafx or System Card
 		status_close; ASK_GAME=$game; return
@@ -618,6 +713,7 @@ usb_watch() {
 	{ echo "$(cut -d' ' -f1 /proc/uptime)s ---- boot, devices present:"; sed 's/^/   /' $prev; } >> "$u"; sync
 	while :; do
 		sleep 0.5
+		[ -f $TMP/usb_pause ] && continue
 		usb_list > $TMP/usb.now
 		if ! cmp -s $prev $TMP/usb.now; then
 			t=$(cut -d' ' -f1 /proc/uptime)
@@ -643,6 +739,7 @@ while :; do
 	if [ -f "$CART_FILE" ]; then export PCE_LAUNCHER_CART=1; else unset PCE_LAUNCHER_CART; fi
 	if [ -n "$ASK_GAME" ]; then export PCE_LAUNCHER_ASK="$ASK_GAME"; ASK_GAME=""; else unset PCE_LAUNCHER_ASK; fi
 	rm -f $TMP/choice
+	verify_library
 	/usr/bin/pce-launcher "$GAMES" $TMP/choice >> $LOGD/launcher.log 2>&1
 	rc=$?; sync; choice=$(head -1 $TMP/choice 2>/dev/null); how=$(sed -n 2p $TMP/choice 2>/dev/null)
 	case "$rc:$choice" in

@@ -14,7 +14,14 @@
  *      mapper, which remaps banks 0x40-0x7F. A mirrored dump that large
  *      must be cut back to its real size.
  *
+ *   3. Flash carts written with huconv.py (HuPROG): a 384 KB game is laid out
+ *      as 256 KB + the same 256 KB again + the last 128 KB, padded with 0xFF.
+ *      That is rebuilt into the standard 384 KB image.
+ *
  * Usage: pce-normalize <in.pce> <out.pce>
+ *        pce-normalize --vote a b c out       (majority of three reads)
+ *        pce-normalize --unregion in out XX   (undo a region-free patch: every
+ *            region check whose branch was patched to 0x80 gets opcode XX back)
  * Exit:  0 = output written, 1 = error.
  */
 #include <stdio.h>
@@ -88,9 +95,38 @@ static int vote(char **f)
     return bad ? 2 : 0;
 }
 
+/* the region-free patch (huconv.py and others) turns the branch after the
+ * region check into BRA (0x80); the original is BEQ (0xF0) or BNE (0xD0) */
+static int unregion(char **a)
+{
+    FILE *f = fopen(a[0], "rb");
+    unsigned char *d;
+    long n, i, hits = 0;
+    int v = (int)strtol(a[2], NULL, 16);
+    if (!f) { perror(a[0]); return 1; }
+    fseek(f, 0, SEEK_END); n = ftell(f); rewind(f);
+    if (n <= 0 || n > (long)MAX_ROM || !(d = malloc((size_t)n))) { fclose(f); return 1; }
+    if (fread(d, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(d); return 1; }
+    fclose(f);
+    for (i = 0; i + 10 <= n; i++)
+        if (d[i] == REGION_SIG[0] && !memcmp(d + i, REGION_SIG, 9) && d[i + 9] == 0x80) { d[i + 9] = (unsigned char)v; hits++; }
+    if (!hits) { free(d); return 1; }
+    if (!(f = fopen(a[1], "wb")) || fwrite(d, 1, (size_t)n, f) != (size_t)n) { if (f) fclose(f); free(d); return 1; }
+    free(d);
+    return fclose(f) != 0;
+}
+
+static int all_ff(const unsigned char *d, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (d[i] != 0xFF) return 0;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 6 && !strcmp(argv[1], "--vote")) return vote(argv + 2);
+    if (argc == 5 && !strcmp(argv[1], "--unregion")) return unregion(argv + 2);
     FILE *f;
     unsigned char *buf, *d;
     size_t n, i;
@@ -128,7 +164,14 @@ int main(int argc, char **argv)
         printf("  TG16 bit-swapped data detected -> decoded\n");
     }
 
-    /* 3. Mirrored oversize dumps: halve while the two halves are identical */
+    /* 3. huconv.py layout of a 384 KB game: 256K, the same 256K, 128K, 0xFF */
+    if (n >= 0xC0000 && !memcmp(d, d + 0x40000, 0x40000) && all_ff(d + 0xA0000, 0x20000)) {
+        memmove(d + 0x40000, d + 0x80000, 0x20000);
+        n = 0x60000;
+        printf("  huconv 384 KB layout -> rebuilt to %lu bytes\n", (unsigned long)n);
+    }
+
+    /* 4. Mirrored oversize dumps: halve while the two halves are identical */
     while (n > ONE_MB && (n % 2) == 0 && memcmp(d, d + n / 2, n / 2) == 0) {
         n /= 2;
         printf("  mirrored image -> trimmed to %lu bytes\n", (unsigned long)n);

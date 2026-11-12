@@ -1,5 +1,16 @@
 # Changelog
 
+## GP2-beta8: verified library, flash-cart dumps, autosave, Debug screen
+
+- **Unreadable carts aren't added.** If some bytes differ in all three reads, the game isn't saved: "Couldn't get a clean read of this HuCard". If the vote settles every byte, the read is used.
+- **Library colours:** green = matches the game database, amber + "Modified?" = a known title with a different checksum (hack, revision or bad read), grey = not in the database (homebrew, CD games). Games copied from a computer are checked once, in the menu (`read-check.txt` now stores each HuCard's checksum).
+- **Standard dumps from flash carts and odd sizes:** huconv.py's 384 KB layout is rebuilt; a known game inside a bigger read (768 KB Darius Plus read as 1 MB, flash-cart leftovers) is trimmed; a region-free patch is undone. The saved file is the standard ROM.
+- **Same game, no duplicate:** a dump matches library files with a 512-byte copier header, and files one folder down.
+- **Database:** Darius Plus header (it was named Darius Alpha); Dai Makaimura Improvement Hack (SuperGrafx), Darius Alpha/Plus SG Enhanced, Die Hard (English), Dinoforce, Gunhed variants.
+- **Autosave every minute** (CD backup RAM) and a flush to the card while a game runs: switching off loses at most a minute.
+- **Dropped frames** logged after every game in `gx-start.log` and `logs/last-session.txt`.
+- **Debug screen** (hold SELECT for 3 s on About): FPS counter, checksums in the library, read every HuCard twice, pause the USB log during games (on by default), hardware status, last game's frames and how it closed.
+
 ## GP2-beta7: bad-read indicator
 
 - A cart read is checked two ways: **unstable** (two reads differed; settled by majority vote) and **mismatch** (the header names a known game but the checksum isn't that game's, so the read is probably damaged).

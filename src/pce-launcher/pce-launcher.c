@@ -56,8 +56,12 @@
 /* ------------------------------------------------------------------ data */
 
 enum { K_HUCARD, K_SGX, K_CD };
-typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; int badread; } Game;
-#define ARCHGX_VERSION "GP2-beta7"
+/* check: from read-check.txt. C_NONE (CD games, not checked yet) and
+ * C_UNKNOWN show grey, C_OK (matches the game database) green, C_MOD (known
+ * title, other checksum: hack, revision or bad read) amber */
+enum { C_NONE, C_UNKNOWN, C_OK, C_MOD };
+typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; int check; char crc[9]; } Game;
+#define ARCHGX_VERSION "GP2-beta8"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -173,18 +177,58 @@ static int each_ref(const char *dir, const char *file, void (*fn)(const char *, 
     return n;
 }
 
-/* read-check.txt (written by gx-start): "file<TAB>unstable|mismatch|ok", last line wins */
-static int bad_read(const char *file)
+/* read-check.txt (written by gx-start): "file<TAB>state<TAB>crc32", last line
+ * wins. state: ok / mismatch / unknown (beta7 also wrote "unstable") */
+static int read_check(const char *file, char *crc)
 {
-    char line[600];
-    int bad = 0;
+    char line[600], *st, *c;
+    int r = C_NONE;
     size_t n = strlen(file);
     FILE *f = fopen(readcheck_path, "r");
-    if (!f) return 0;
-    while (fgets(line, sizeof line, f))
-        if (!strncmp(line, file, n) && line[n] == '\t') bad = strncmp(line + n + 1, "ok", 2) != 0;
+    crc[0] = 0;
+    if (!f) return C_NONE;
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, file, n) || line[n] != '\t') continue;
+        st = line + n + 1;
+        c = strchr(st, '\t');
+        r = !strncmp(st, "ok", 2) ? C_OK : !strncmp(st, "unknown", 7) ? C_UNKNOWN : C_MOD;
+        crc[0] = 0;
+        if (c) { snprintf(crc, 9, "%.8s", c + 1); if (strlen(crc) < 8) crc[0] = 0; }
+        else if (r == C_OK) r = C_NONE;          /* beta7 "ok" line: checked again by gx-start */
+    }
     fclose(f);
-    return bad;
+    return r;
+}
+
+/* debug.cfg (Debug screen, hidden: hold SELECT on About) */
+enum { D_FPS, D_CRC, D_TWICE, D_USBPAUSE, D_N };
+static const char *dbg_key[D_N] = { "fps", "crc", "readtwice", "usbpause" };
+static const char *dbg_name[D_N] = { "FPS counter in games", "Checksums in the library", "Read every HuCard twice", "Pause the USB log during games" };
+static int dbg_val[D_N] = { 0, 0, 0, 1 };
+static char debug_path[512];
+static void debug_load(void)
+{
+    char line[200];
+    int i;
+    FILE *f = fopen(debug_path, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f))
+        for (i = 0; i < D_N; i++) {
+            size_t k = strlen(dbg_key[i]);
+            if (!strncmp(line, dbg_key[i], k) && line[k] == '=') dbg_val[i] = atoi(line + k + 1) ? 1 : 0;
+        }
+    fclose(f);
+}
+static void debug_save(void)
+{
+    char tmp[600];
+    int i;
+    FILE *f;
+    snprintf(tmp, sizeof tmp, "%s.new", debug_path);
+    if (!(f = fopen(tmp, "w"))) return;
+    fprintf(f, "# ArchGX debug options (Debug screen)\n");
+    for (i = 0; i < D_N; i++) fprintf(f, "%s=%d\n", dbg_key[i], dbg_val[i]);
+    if (fclose(f) == 0) rename(tmp, debug_path);
 }
 
 static int recent_rank(const char *file);
@@ -204,9 +248,9 @@ static void add_game(const char *dir, const char *name, int kind)
         if (dot && dot != lab) *dot = '\0';
     }
     if (!lab) { free(p); return; }
-    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
     games[ngames].recent = recent_rank(name); games[ngames].kind = kind;
-    games[ngames].badread = bad_read(name);
+    games[ngames].check = kind == K_CD ? C_NONE : read_check(name, games[ngames].crc);
     ngames++;
 }
 
@@ -335,30 +379,30 @@ static void scan_library(void)
     if (cd_present) {                        /* a disc in a USB CD drive */
         games[ngames].path = strdup("__RIPCD__");
         games[ngames].label = strdup("Play the CD in the drive");
-        games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+        games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
         ngames++;
     }
     if (getenv("PCE_LAUNCHER_CART")) {      /* a HuCard is sitting in the slot */
         games[ngames].path = strdup("__CART__");
         games[ngames].label = strdup("Play the HuCard in the slot");
-        games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+        games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
         ngames++;
     }
     games[ngames].path = strdup("__PADTEST__");
     games[ngames].label = strdup("Controller test");
-    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
     ngames++;
     games[ngames].path = strdup("__ABOUT__");
     games[ngames].label = strdup("About");
-    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
     ngames++;
     games[ngames].path = strdup("__RETROARCH__");
     games[ngames].label = strdup("RetroArch (advanced)");
-    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
     ngames++;
     games[ngames].path = strdup("__RESTART__");
     games[ngames].label = strdup("Restart console");
-    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
     ngames++;
 }
 
@@ -724,7 +768,8 @@ static TTF_Font *f_title, *f_item, *f_hint;
 static int W, H;
 static const SDL_Color white = {255, 255, 255, 255}, dim = {170, 178, 196, 255},
                        accent = {250, 210, 0, 255}, red = {255, 90, 80, 255},
-                       ink = {18, 18, 22, 255};    /* text on the yellow accent */
+                       ink = {18, 18, 22, 255},    /* text on the yellow accent */
+                       c_ok = {130, 225, 140, 255}, c_mod = {255, 170, 70, 255}, c_unk = {150, 156, 168, 255};
 
 static void text(TTF_Font *font, const char *s, SDL_Color c, int x, int y, int align)
 {
@@ -854,7 +899,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
 
 /* ------------------------------------------------------- input actions */
 
-enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_RUN, A_SELECT };
+enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_RUN, A_SELECT, A_DEBUG };   /* A_DEBUG: test hook */
 
 static int key_action(SDL_Keycode k)
 {
@@ -873,9 +918,9 @@ static int key_action(SDL_Keycode k)
 
 static int test_action(const char *w)
 {
-    static const char *names[] = { "", "up", "down", "left", "right", "ok", "back", "run", "select" };
+    static const char *names[] = { "", "up", "down", "left", "right", "ok", "back", "run", "select", "debug" };
     int i;
-    for (i = 1; i < 9; i++) if (!strcmp(w, names[i])) return i;
+    for (i = 1; i < 10; i++) if (!strcmp(w, names[i])) return i;
     return A_NONE;
 }
 
@@ -893,7 +938,7 @@ static const char *kb_special[] = { "abc", "Space", "Del", "Clear", "Done", "Can
 
 /* ---------------------------------------------------------------- main */
 
-enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT, M_ASK };
+enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT, M_ASK, M_DEBUG };
 static const char *opnames[6];
 
 /* ------------------------------------------------------ in-game menu */
@@ -1686,6 +1731,50 @@ static void draw_about(void)
     text(f_hint, "I / II  Close", dim, W / 2, py + ph - H / 16, 1);
 }
 
+/* Debug screen (hidden: hold SELECT for 3 s on About) */
+#define DBG_ITEMS (D_N + 1)            /* the options, then Close */
+static void draw_debug(int opt)
+{
+    int pw = W * 72 / 100, ph = H * 80 / 100, px, py, lh = H / 17, y, i, drive;
+    char line[200], ls[3][160], lp[600];
+    FILE *f;
+    const char *dev = getenv("PCE_LAUNCHER_CD") ? getenv("PCE_LAUNCHER_CD") : "/dev/sr0";
+    panel(pw, ph, &px, &py);
+    y = py + H / 40;
+    text(f_title, "Debug", accent, W / 2, y, 1); y += H / 10;
+    for (i = 0; i < DBG_ITEMS; i++, y += lh) {
+        if (i == opt) fill(px + W / 60, y - lh / 10, pw - W / 30, lh, 255, 255, 255, 40);
+        if (i < D_N) {
+            text(f_item, dbg_name[i], white, px + W / 30, y, 0);
+            text(f_item, dbg_val[i] ? "On" : "Off", dbg_val[i] ? c_ok : dim, px + pw - W / 30, y, 2);
+        } else text(f_item, "Close", white, W / 2, y, 1);
+    }
+    y += lh / 2;
+    fill(px + W / 30, y, pw - W / 15, 1, 255, 255, 255, 60); y += lh / 2;
+    drive = access(dev, F_OK) == 0;
+    snprintf(line, sizeof line, "Cart reader: %s", hw_flags & HW_READER ? "OK" : "not found");
+    text(f_hint, line, hw_flags & HW_READER ? white : red, px + W / 30, y, 0);
+    snprintf(line, sizeof line, "Front USB ports: %s", hw_flags & HW_HUB ? "OK" : "not found");
+    text(f_hint, line, hw_flags & HW_HUB ? white : red, W / 2, y, 1);
+    snprintf(line, sizeof line, "CD drive: %s", drive ? (cd_present ? "disc in" : "connected") : "none");
+    text(f_hint, line, white, px + pw - W / 30, y, 2); y += lh;
+    /* logs/last-session.txt (gx-start): title, dropped frames, how it closed */
+    snprintf(lp, sizeof lp, "%s", readcheck_path);
+    if (strrchr(lp, '/')) strcpy(strrchr(lp, '/') + 1, "logs/last-session.txt"); else strcpy(lp, "logs/last-session.txt");
+    ls[0][0] = ls[1][0] = ls[2][0] = 0;
+    if ((f = fopen(lp, "r"))) {
+        for (i = 0; i < 3 && fgets(ls[i], sizeof ls[i], f); i++) ls[i][strcspn(ls[i], "\r\n")] = 0;
+        fclose(f);
+    }
+    if (ls[0][0]) {
+        snprintf(line, sizeof line, "Last game: %s", ls[0]);
+        text(f_hint, line, white, px + W / 30, y, 0); y += lh * 3 / 4;
+        snprintf(line, sizeof line, "%s  -  %s", ls[1], ls[2]);
+        text(f_hint, line, dim, px + W / 30, y, 0);
+    } else text(f_hint, "Last game: none yet", dim, px + W / 30, y, 0);
+    text(f_hint, "I / Left / Right  Change      II  Close", dim, W / 2, py + ph - H / 16, 1);
+}
+
 static int pad_dir(SDL_Joystick *j, int which)      /* 0 up, 1 down, 2 left, 3 right */
 {
     if (SDL_JoystickNumHats(j) > 0) {
@@ -1778,6 +1867,7 @@ int main(int argc, char **argv)
     SDL_DisplayMode dm;
     int sel = 0, top = 0, rows, row_h, list_y, list_x, list_w, dirty = 1, i;
     int mode = M_LIST, opt = 0, held = 0, kb_r = 0, kb_c = 0, kb_lower = 0;
+    Uint32 about_sel = 0;
     char kb_text[NAME_MAX_LEN + 1] = "", msg[160] = "";
     Uint32 last_cart = 0, repeat_at = 0, msg_until = 0;
     unsigned long cart0;
@@ -1803,6 +1893,8 @@ int main(int argc, char **argv)
     snprintf(recent_path, sizeof recent_path, "%.*srecent.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(bios_dir, sizeof bios_dir, "%.*sbios", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(readcheck_path, sizeof readcheck_path, "%.*sread-check.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(debug_path, sizeof debug_path, "%.*sdebug.cfg", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    debug_load();
     snprintf(saves_dir, sizeof saves_dir, "%.*ssaves", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     cart0 = (status_mode || ingame_mode) ? 0 : cart_state();
 
@@ -1900,12 +1992,37 @@ int main(int argc, char **argv)
         }
         now = SDL_GetTicks();
         if (held && now >= repeat_at) { push(held); repeat_at = now + 90; }
+        if (about_sel && mode == M_ABOUT) {        /* SELECT on About: released = close, held 3 s = Debug */
+            int k, down = 0;
+            for (k = 0; k < npads; k++) {
+                SDL_Joystick *j = SDL_JoystickFromInstanceID(pads[k].id);
+                if (j && pad_btn(j, pads[k].map.select)) down = 1;
+            }
+            if (!down) { mode = M_LIST; about_sel = 0; dirty = 1; }
+            else if (now - about_sel >= 3000) { mode = M_DEBUG; opt = 0; about_sel = 0; dirty = 1; SDL_Log("debug screen opened"); }
+        } else about_sel = 0;
 
         /* ---- handle actions ---- */
         while ((a = pop()) != A_NONE) {
             dirty = 1;
             if (mode == M_MESSAGE) { mode = M_LIST; continue; }
-            if (mode == M_ABOUT) { if (a == A_OK || a == A_BACK || a == A_RUN || a == A_SELECT) mode = M_LIST; continue; }
+            if (a == A_DEBUG) { mode = M_DEBUG; opt = 0; continue; }
+            if (mode == M_ABOUT) {
+                if (a == A_SELECT) about_sel = now ? now : 1;      /* held 3 s: Debug (checked below) */
+                else if (a == A_OK || a == A_BACK || a == A_RUN) mode = M_LIST;
+                continue;
+            }
+            if (mode == M_DEBUG) {
+                if (a == A_UP) opt = (opt + DBG_ITEMS - 1) % DBG_ITEMS;
+                else if (a == A_DOWN) opt = (opt + 1) % DBG_ITEMS;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == D_N)) mode = M_LIST;
+                else if (opt < D_N && (a == A_OK || a == A_RUN || a == A_LEFT || a == A_RIGHT)) {
+                    dbg_val[opt] = !dbg_val[opt]; debug_save();
+                    SDL_Log("debug: %s=%d", dbg_key[opt], dbg_val[opt]);
+                    if (opt == D_CRC) { int k; for (k = 0; k < ngames; k++) if (games[k].tex) { SDL_DestroyTexture(games[k].tex); games[k].tex = NULL; } }
+                }
+                continue;
+            }
 
             if (mode == M_LIST) {
                 if (a == A_UP || a == A_DOWN) {
@@ -2115,22 +2232,27 @@ int main(int argc, char **argv)
                 fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
                 fill(list_x - W / 80, y, W / 200 + 2, row_h - 4, accent.r, accent.g, accent.b, 255);
             }
-            if (top + i < nreal && (g->recent || g->kind != K_HUCARD || g->badread)) {
+            if (top + i < nreal && (g->recent || g->kind != K_HUCARD || g->check == C_MOD || (dbg_val[D_CRC] && g->crc[0]))) {
                 static const char *kn[] = { "", "SGX", "CD" };
-                char tag[40];
-                snprintf(tag, sizeof tag, "%s%s%s%s%s", g->badread ? "Bad read?" : "", g->badread && (g->recent || g->kind) ? "  " : "",
+                char tag[64];
+                const char *first = dbg_val[D_CRC] && g->crc[0] ? g->crc : g->check == C_MOD ? "Modified?" : "";
+                snprintf(tag, sizeof tag, "%s%s%s%s%s", first, *first && (g->recent || g->kind) ? "  " : "",
                          g->recent ? "Recent" : "", g->recent && g->kind ? "  " : "", kn[g->kind]);
-                text(f_hint, tag, g->badread ? red : dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+                text(f_hint, tag, g->check == C_MOD ? c_mod : dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
             }
             if (top + i > 0 && top + i < nreal && !g->recent && games[top + i - 1].recent)
                 fill(list_x, y - 2, list_w, 1, 255, 255, 255, 60);      /* end of the recent block */
             if (g->tex) {
                 SDL_Rect dst = { list_x + W / 60, y + (row_h - 4 - g->th) / 2, g->tw, g->th };
                 SDL_Rect src;
-                int tagw = (g->recent ? W / 10 : 0) + (g->kind ? W / 20 : 0) + (g->badread ? W / 8 : 0);
+                int tagw = (g->recent ? W / 10 : 0) + (g->kind ? W / 20 : 0) + (g->check == C_MOD || (dbg_val[D_CRC] && g->crc[0]) ? W / 8 : 0);
                 if (dst.w > list_w - W / 30 - tagw) dst.w = list_w - W / 30 - tagw;
                 src.x = 0; src.y = 0; src.w = dst.w; src.h = g->th;
                 SDL_SetTextureAlphaMod(g->tex, top + i == sel ? 255 : 190);
+                if (top + i < nreal) {          /* green: matches the database, amber: modified?, grey: unknown */
+                    SDL_Color c = g->check == C_OK ? c_ok : g->check == C_MOD ? c_mod : c_unk;
+                    SDL_SetTextureColorMod(g->tex, c.r, c.g, c.b);
+                }
                 SDL_RenderCopy(ren, g->tex, &src, &dst);
             }
         }
@@ -2147,12 +2269,13 @@ int main(int argc, char **argv)
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"
                                    : "I / RUN  Restart the console")
-                                  : games[sel].badread ? "Possible bad read: clean the HuCard and insert it again to replace this copy"
+                                  : games[sel].check == C_MOD ? "Doesn't match the known copy: a hack, a revision or a bad read. Re-insert the HuCard to check"
                                   : "I / RUN  Play       SELECT  Game options       Left/Right  Page",
              dim, W / 2, H * 91 / 100, 1);
 
         if (hw_warning()) text(f_hint, hw_warning(), red, W / 2, H * 86 / 100, 1);
         if (mode == M_ABOUT) draw_about();
+        if (mode == M_DEBUG) draw_debug(opt);
         if (mode == M_PLAY) {
             static const char *items[] = { "Resume last save", "Start new game", "Cancel" };
             int pw = W * 40 / 100, ph = row_h * 5, px, py;
