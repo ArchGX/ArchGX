@@ -61,7 +61,7 @@ enum { K_HUCARD, K_SGX, K_CD };
  * title, other checksum: hack, revision or bad read) amber */
 enum { C_NONE, C_UNKNOWN, C_OK, C_MOD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; int check; char crc[9]; } Game;
-#define ARCHGX_VERSION "GP2-beta8"
+#define ARCHGX_VERSION "GP2-beta9"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -491,7 +491,8 @@ static int delete_game(int idx)
 
 /* Rename a library game: record a new title for its file (the file and its
  * saves keep their names). Naming an unidentified HuCard dump (cart-<crc32>)
- * also adds it to the local game database (gamedb-local.csv), ready to share. */
+ * also adds it to the local game database (gamedb-local.csv), ready to share;
+ * naming a copied CD (cd-<disc id>.cue) adds it to cddb-local.csv the same way. */
 static int rename_game(int idx, const char *newname, char *newpath, size_t np)
 {
     const char *file = strrchr(games[idx].path, '/') ? strrchr(games[idx].path, '/') + 1 : games[idx].path;
@@ -509,6 +510,24 @@ static int rename_game(int idx, const char *newname, char *newpath, size_t np)
             for (c = newname; *c; c++) { if (*c == '"') fputc('"', f); fputc(*c, f); }
             fprintf(f, "\",,named on console\r\n");
             fclose(f);
+        }
+    }
+    {
+        unsigned id;
+        char tail[8] = "", cdb[600];
+        if (sscanf(file, "cd-%8x%7s", &id, tail) == 2 && !strcmp(tail, ".cue") && strlen(file) == 15) {
+            int fresh;
+            snprintf(cdb, sizeof cdb, "%s", localdb_path);
+            if (strrchr(cdb, '/')) strcpy(strrchr(cdb, '/') + 1, "cddb-local.csv"); else strcpy(cdb, "cddb-local.csv");
+            fresh = !exists(cdb);
+            if ((f = fopen(cdb, "a"))) {
+                const char *c;
+                if (fresh) fprintf(f, "discid,title,region,notes\r\n");
+                fprintf(f, "0x%08x,\"", id);
+                for (c = newname; *c; c++) { if (*c == '"') fputc('"', f); fputc(*c, f); }
+                fprintf(f, "\",,named on console\r\n");
+                fclose(f);
+            }
         }
     }
     sync();
@@ -835,12 +854,26 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
 {
     char line[4][256];
     Uint32 start = SDL_GetTicks(), last_read = 0, missing_since = 0;
-    int pct = -1, err = 0, frame = 0, i;
+    int pct = -1, err = 0, frame = 0, i, cancel = 0, asked = 0;
     memset(line, 0, sizeof line);
     for (;;) {
         SDL_Event ev;
         Uint32 now = SDL_GetTicks();
-        while (SDL_PollEvent(&ev)) if (ev.type == SDL_QUIT) _exit(0);
+        while (SDL_PollEvent(&ev)) {
+            int want = 0;
+            if (ev.type == SDL_QUIT) _exit(0);
+            if (ev.type == SDL_JOYDEVICEADDED) add_pad(ev.jdevice.which);
+            if (ev.type == SDL_JOYBUTTONDOWN) { PadMap *m = pad_map(ev.jbutton.which); want = m && ev.jbutton.button == m->b; }
+            if (ev.type == SDL_KEYDOWN) want = ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_BACKSPACE;
+            /* state "cancel": the job can be stopped with II; it watches for <status>.abort */
+            if (want && cancel && !asked) {
+                char ap[600];
+                FILE *af;
+                snprintf(ap, sizeof ap, "%s.abort", path);
+                if ((af = fopen(ap, "w"))) fclose(af);
+                asked = 1;
+            }
+        }
         if (quit_flag) _exit(0);
         if (now - last_read >= 100 || !last_read) {
             FILE *f = fopen(path, "r");
@@ -856,6 +889,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
                 fclose(f);
                 if (!strcmp(line[3], "done")) _exit(0);
                 err = !strcmp(line[3], "error");
+                cancel = !strcmp(line[3], "cancel");
                 pct = (line[2][0] >= '0' && line[2][0] <= '9') ? atoi(line[2]) : -1;
                 if (pct > 100) pct = 100;
             }
@@ -865,7 +899,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
         if (bg) { SDL_RenderCopy(ren, bg, NULL, NULL); fill(0, 0, W, H, 0, 0, 0, 90); }
         {
             int pw = W * 60 / 100, ph = H * 30 / 100, px, py, bx, by, bw, bh;
-            panel(pw, ph, &px, &py);
+            panel(pw, cancel ? ph + H / 14 : ph, &px, &py);
             draw_img(tex_emblem, px + pw / 40, py + ph / 14, H / 18, 0);
             text(f_item, line[0], err ? red : white, W / 2, py + ph * 18 / 100, 1);
             text(f_hint, line[1], accent, W / 2, py + ph * 40 / 100, 1);
@@ -876,6 +910,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
                 fill(bx, by, bw * pct / 100, bh, accent.r, accent.g, accent.b, 255);
                 snprintf(t, sizeof t, "%d%%", pct);
                 text(f_hint, t, dim, W / 2, by + bh * 2, 1);
+                if (cancel) text(f_hint, asked ? "Cancelling..." : "II  Cancel", white, W / 2, py + ph, 1);
             } else if (!err) {                            /* activity only: no percentage */
                 int n = 8, r = H / 90 + 2, cx = W / 2, cy = by + bh / 2, k;
                 for (k = 0; k < n; k++) {
@@ -1923,7 +1958,10 @@ int main(int argc, char **argv)
     if (!f_title || !f_item || !f_hint) { fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError()); return 1; }
     bg = IMG_LoadTexture(ren, BG_PATH);
     load_brand();
-    if (status_mode) return run_status(argv[2], bg, shot);
+    if (status_mode) {
+        for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);       /* II cancels a CD copy */
+        return run_status(argv[2], bg, shot);
+    }
 
     cd_check();
     scan_library();

@@ -94,7 +94,7 @@ cp "$RA/gfx/video_filters/ArchGX_Scanlines.filt" "$RA/gfx/video_filters/Blargg_N
 echo "== system files"
 for f in gx-start.sh gx-reset.sh fix_storage.sh; do install -m 755 "$TOP/system/etc/$f" "$PAY/etc/$f"; done
 for f in gx-retroarch.cfg gx-retroarch-advanced.cfg gx-resume.cfg; do install -m 644 "$TOP/system/etc/$f" "$PAY/etc/$f"; done
-install -m 644 "$TOP/system/share/gamedb.csv" "$TOP/assets/system/background.png" "$TOP/assets/system/logo.png" \
+install -m 644 "$TOP/system/share/gamedb.csv" "$TOP/system/share/cddb.csv" "$TOP/assets/system/background.png" "$TOP/assets/system/logo.png" \
 	"$TOP/assets/system/emblem.png" "$PAY/usr/share/archgx/"
 echo "ArchGX $(cat "$TOP/VERSION")" > "$PAY/etc/archgx-release"
 

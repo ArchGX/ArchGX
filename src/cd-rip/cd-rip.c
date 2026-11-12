@@ -14,15 +14,23 @@
  * runs from its track's start to the next track's start, so the disc's LBAs
  * are kept. Work happens in a hidden ".rip-<id>" folder, renamed at the end.
  *
- * Reading: SCSI READ CD (0xBE) through SG_IO, 16 sectors at a time. A failed
- * chunk is retried, then read sector by sector (3 tries each); a sector that
- * still fails is written as zeros and counted. If the drive refuses raw reads
- * of a data track, that track falls back to normal 2048-byte reads (MODE1/2048).
+ * Reading: SCSI READ CD (0xBE) through SG_IO, 48 sectors at a time (under the
+ * usual 120 KB USB transfer limit; halved if the drive refuses big reads). A
+ * failed chunk is retried, then read sector by sector (3 tries each); a sector
+ * that still fails is written as zeros and counted. After 16 bad sectors in a
+ * row the area is skipped: only one sector a second (75) is tried, once, until
+ * reads work again, so a damaged edge costs seconds instead of half an hour.
+ * If the drive refuses raw reads of a data track, that track falls back to
+ * normal 2048-byte reads (MODE1/2048).
+ *
+ * Cancel: the status screen creates <status-file>.abort when II is pressed;
+ * the partial copy is deleted.
  *
  * Progress goes to <status-file> in pce-launcher --status format:
  * message, subtitle, percent, state.
  *
- * Exit: 0 ok (prints the cue path), 1 error, 2 no disc, 3 not enough space.
+ * Exit: 0 ok (prints the cue path), 1 error, 2 no disc, 3 not enough space,
+ *       4 done with unreadable sectors, 5 cancelled.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -42,7 +50,9 @@
 #include <scsi/sg.h>
 
 #define SECTOR 2352
-#define CHUNK  16
+#define CHUNK  48          /* largest read; 48 x 2352 = 110 KB */
+#define BADRUN 16          /* bad sectors in a row before an area is skipped */
+#define PROBE  75          /* in a skipped area, try one sector per second of audio */
 #define MAXT   99
 
 typedef struct { int num, data, start, end, cooked; } Track;
@@ -72,11 +82,13 @@ static int read_cd(int lba, int n, int data, unsigned char *buf)
     unsigned char cdb[12] = { 0xBE }, sense[32];
     sg_io_hdr_t io;
     if (test_img) {
+        if (getenv("CDRIP_TEST_SLOW")) usleep(atoi(getenv("CDRIP_TEST_SLOW")));   /* simulate a slow drive */
         if (fseek(test_img, (long)lba * SECTOR, SEEK_SET) != 0) return -1;
         if ((int)fread(buf, SECTOR, n, test_img) != n) return -1;
-        if (getenv("CDRIP_TEST_BAD")) {        /* simulate one unreadable sector */
-            int bad = atoi(getenv("CDRIP_TEST_BAD"));
-            if (bad >= lba && bad < lba + n) return -1;
+        if (getenv("CDRIP_TEST_BAD")) {        /* simulate unreadable sectors: "N" or "FIRST-LAST" */
+            const char *v = getenv("CDRIP_TEST_BAD"), *d = strchr(v, '-');
+            int b0 = atoi(v), b1 = d ? atoi(d + 1) : b0;
+            if (b0 < lba + n && b1 >= lba) return -1;
         }
         return 0;
     }
@@ -199,7 +211,8 @@ static int rip(const char *games)
     char id[16], tmpdir[600], final[600], path[800], cue[800], sub[160], tl[32];
     unsigned char *buf = malloc(CHUNK * SECTOR);
     long long total = 0, done = 0;
-    int i, bad = 0, lastpct = -1;
+    int i, bad = 0, lastpct = -1, chunk = CHUNK, run = 0, skipping = 0, skip_from = 0;
+    char abort_path[600];
     double t0 = now_s(), lastst = 0;
     struct statvfs vf;
     FILE *cf;
@@ -219,6 +232,8 @@ static int rip(const char *games)
     rm_tree(tmpdir);
     if (mkdir(tmpdir, 0755) != 0) { perror(tmpdir); return 1; }
     fprintf(stderr, "cd-rip: disc %s, %d tracks, %lld sectors (%lld MB)\n", id, ntrk, total, total * SECTOR >> 20);
+    snprintf(abort_path, sizeof abort_path, "%s.abort", status_path ? status_path : "");
+    unlink(abort_path);
 
     for (i = 0; i < ntrk; i++) {
         Track *t = &trk[i];
@@ -227,8 +242,16 @@ static int rip(const char *games)
         snprintf(path, sizeof path, "%s/cd-%s (Track %02d).bin", tmpdir, id, t->num);
         if (!(o = fopen(path, "wb"))) { perror(path); goto fail; }
         while (lba < t->end) {
-            int n = t->end - lba < CHUNK ? t->end - lba : CHUNK, ok, k, r;
-            if (t->cooked) ok = read_cooked(lba, n, buf) == 0;
+            int n = t->end - lba < chunk ? t->end - lba : chunk, ok, k, r, kbad = 0, was_skipping = skipping;
+            if (status_path && access(abort_path, F_OK) == 0) {
+                unlink(abort_path);
+                fclose(o); rm_tree(tmpdir); free(buf);
+                fprintf(stderr, "cd-rip: cancelled after %.0f s\n", now_s() - t0);
+                status("CD copy cancelled", "", -1, "");
+                return 5;
+            }
+            if (skipping) ok = 0;            /* damaged area: probes only, below */
+            else if (t->cooked) ok = read_cooked(lba, n, buf) == 0;
             else {
                 ok = read_cd(lba, n, t->data, buf) == 0 || read_cd(lba, n, t->data, buf) == 0;
                 if (!ok && t->data && lba == t->start && read_cooked(lba, n, buf) == 0) {
@@ -240,9 +263,26 @@ static int rip(const char *games)
             if (!ok) {                       /* sector by sector */
                 for (k = 0; k < n; k++) {
                     unsigned char *s = buf + k * sz;
-                    for (r = 0; r < 3; r++)
+                    int tries = skipping ? 1 : 3;
+                    if (skipping && (lba + k - skip_from) % PROBE) { memset(s, 0, sz); bad++; continue; }
+                    for (r = 0; r < tries; r++)
                         if ((t->cooked ? read_cooked(lba + k, 1, s) : read_cd(lba + k, 1, t->data, s)) == 0) break;
-                    if (r == 3) { memset(s, 0, sz); bad++; fprintf(stderr, "cd-rip: unreadable sector %d\n", lba + k); }
+                    if (r < tries) {
+                        if (skipping) fprintf(stderr, "cd-rip: skipped sectors %d-%d (damaged area)\n", skip_from, lba + k - 1);
+                        run = 0; skipping = 0;
+                        continue;
+                    }
+                    memset(s, 0, sz); bad++; kbad++;
+                    if (!skipping) fprintf(stderr, "cd-rip: unreadable sector %d\n", lba + k);
+                    if (!skipping && ++run >= BADRUN) {
+                        skipping = 1; skip_from = lba + k + 1;
+                        fprintf(stderr, "cd-rip: %d bad sectors in a row: skipping ahead from sector %d\n", BADRUN, skip_from);
+                    }
+                }
+                /* the chunk failed but every sector read alone: the drive dislikes big reads */
+                if (!kbad && !was_skipping && !skipping && chunk > 8 && !t->cooked) {
+                    chunk /= 2;
+                    fprintf(stderr, "cd-rip: reads of %d sectors failed, using %d\n", chunk * 2, chunk);
                 }
             }
             if (fwrite(buf, sz, n, o) != (size_t)n) { fclose(o); fprintf(stderr, "cd-rip: write failed: %s\n", strerror(errno)); goto fail; }
@@ -252,14 +292,16 @@ static int rip(const char *games)
                 int pct = (int)(done * 100 / total);
                 if (pct != lastpct || now_s() - lastst > 1) {
                     fmt_time(tl, sizeof tl, rate > 0 ? (total - done) * SECTOR / 1e6 / rate : 0);
-                    snprintf(sub, sizeof sub, "Track %d of %d  -  %.1f MB/s  -  about %s left", i + 1, ntrk, rate, tl);
-                    status("Copying CD...", sub, pct, "");
+                    if (skipping) snprintf(sub, sizeof sub, "Track %d of %d  -  skipping a damaged area...", i + 1, ntrk);
+                    else snprintf(sub, sizeof sub, "Track %d of %d  -  %.1f MB/s  -  about %s left", i + 1, ntrk, rate, tl);
+                    status("Copying CD...", sub, pct, "cancel");
                     lastpct = pct; lastst = now_s();
                 }
             }
         }
         if (fclose(o) != 0) goto fail;
     }
+    if (skipping) fprintf(stderr, "cd-rip: skipped sectors %d-%d (damaged area, end of disc)\n", skip_from, trk[ntrk].start - 1);
 
     snprintf(path, sizeof path, "%s/cd-%s.cue", tmpdir, id);
     if (!(cf = fopen(path, "w"))) goto fail;

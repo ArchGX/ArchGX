@@ -631,14 +631,30 @@ play_cart() {
 # (cd-rip: progress on the status screen), then play it. A disc copied before
 # is recognised by its table of contents and played straight away.
 CD_DEV=/dev/sr0
+# CD names by disc id (from the table of contents): cddb-local.csv (named on
+# the console with Rename, newest line wins) before the built-in cddb.csv
+CD_DB=/usr/share/archgx/cddb.csv
+LOCAL_CDDB=$ROM/cddb-local.csv
+cd_title() {
+	cat "$CD_DB" "$LOCAL_CDDB" 2>/dev/null | tr -d '\r' | awk -F, -v id="$1" '
+		{ k = tolower($1); sub(/^"/, "", k); sub(/^0x/, "", k) }
+		k == id { t = $0; sub(/^[^,]*,/, "", t)
+			if (t ~ /^"/) { t = substr(t, 2); sub(/",.*$/, "", t); gsub(/""/, "\"", t) } else sub(/,.*$/, "", t)
+			if (t != "") last = t }
+		END { print last }'
+}
 rip_cd() {
 	status_show "Reading the CD..." "" "-"
+	rm -f $TMP/status.abort
 	out=$(/usr/bin/cd-rip $CD_DEV "$GAMES" $TMP/status 2>> "$LOG"); rc=$?
 	case $rc in
 	0|4)	cue=$(echo "$out" | tail -1)
 		id=$(basename "$cue" .cue); id=${id#cd-}
-		awk -F '\t' -v f="$(basename "$cue")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null ||
-			set_title "$cue" "Unknown CD ($id)"         # Rename gives it a name
+		if ! awk -F '\t' -v f="$(basename "$cue")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
+			t=$(cd_title "$id")
+			set_title "$cue" "${t:-Unknown CD ($id)}"     # unknown: Rename gives it a name
+			log "cd: disc $id ${t:+is \"$t\"}${t:-is not in the CD database}"
+		fi
 		log "cd: $cue (cd-rip exit $rc)"
 		if [ $rc = 4 ]; then
 			status_show "CD copied, but some sectors could not be read" "Clean the disc and copy it again if the game misbehaves" "" error; sleep 4
@@ -647,6 +663,7 @@ rip_cd() {
 		run_game "$cue" ;;
 	2)	show_error "No disc in the drive" "Insert a PC Engine CD and try again" ;;
 	3)	sleep 3; status_close ;;                     # cd-rip showed "Not enough space"
+	5)	log "cd: copy cancelled"; sleep 2; status_close ;;
 	*)	show_error "Could not copy the CD" "See logs/gx-start.log" ;;
 	esac
 }

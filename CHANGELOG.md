@@ -1,5 +1,13 @@
 # Changelog
 
+## GP2-beta9: faster, cancellable CD copies; CD names
+
+From the first real-drive test (Bonk 3 CD, Sapphire and Nexzr copied at about 1.2 MB/s; Nexzr's last 2,489 sectors were unreadable and took about 22 minutes of retries):
+- **Cancel a CD copy with II.** The partial copy is deleted.
+- **Damaged areas are skipped.** After 16 bad sectors in a row, only one sector per second of audio is tried, once, until reads work again ("skipping a damaged area..."). Nexzr's damaged edge would now take seconds.
+- **Bigger reads:** 48 sectors per request instead of 16 (halved automatically if a drive refuses them).
+- **CD names:** a copied disc is named from `cddb.csv` by its disc id. Renaming a CD on the console adds it to `cddb-local.csv`, ready to share like `gamedb-local.csv`.
+
 ## GP2-beta8: verified library, flash-cart dumps, autosave, Debug screen
 
 - **Unreadable carts aren't added.** If some bytes differ in all three reads, the game isn't saved: "Couldn't get a clean read of this HuCard". If the vote settles every byte, the read is used.
