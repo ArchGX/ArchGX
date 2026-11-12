@@ -56,8 +56,8 @@
 /* ------------------------------------------------------------------ data */
 
 enum { K_HUCARD, K_SGX, K_CD };
-typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta6"
+typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; int badread; } Game;
+#define ARCHGX_VERSION "GP2-beta7"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -65,7 +65,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
 static Game games[MAX_GAMES];
 static int ngames;          /* list entries, including the restart entry */
 static int nreal;           /* actual games */
-static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512], bios_dir[512];
+static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512], bios_dir[512], readcheck_path[512];
 
 /* ------------------------------------------------------------- titles */
 /* titles.txt: "file<TAB>title" lines; the last entry for a file wins.
@@ -173,6 +173,20 @@ static int each_ref(const char *dir, const char *file, void (*fn)(const char *, 
     return n;
 }
 
+/* read-check.txt (written by gx-start): "file<TAB>unstable|mismatch|ok", last line wins */
+static int bad_read(const char *file)
+{
+    char line[600];
+    int bad = 0;
+    size_t n = strlen(file);
+    FILE *f = fopen(readcheck_path, "r");
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, file, n) && line[n] == '\t') bad = strncmp(line + n + 1, "ok", 2) != 0;
+    fclose(f);
+    return bad;
+}
+
 static int recent_rank(const char *file);
 static void add_game(const char *dir, const char *name, int kind)
 {
@@ -190,8 +204,9 @@ static void add_game(const char *dir, const char *name, int kind)
         if (dot && dot != lab) *dot = '\0';
     }
     if (!lab) { free(p); return; }
-    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
+    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
     games[ngames].recent = recent_rank(name); games[ngames].kind = kind;
+    games[ngames].badread = bad_read(name);
     ngames++;
 }
 
@@ -320,30 +335,30 @@ static void scan_library(void)
     if (cd_present) {                        /* a disc in a USB CD drive */
         games[ngames].path = strdup("__RIPCD__");
         games[ngames].label = strdup("Play the CD in the drive");
-        games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
+        games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
         ngames++;
     }
     if (getenv("PCE_LAUNCHER_CART")) {      /* a HuCard is sitting in the slot */
         games[ngames].path = strdup("__CART__");
         games[ngames].label = strdup("Play the HuCard in the slot");
-        games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
+        games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
         ngames++;
     }
     games[ngames].path = strdup("__PADTEST__");
     games[ngames].label = strdup("Controller test");
-    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
     ngames++;
     games[ngames].path = strdup("__ABOUT__");
     games[ngames].label = strdup("About");
-    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
     ngames++;
     games[ngames].path = strdup("__RETROARCH__");
     games[ngames].label = strdup("RetroArch (advanced)");
-    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
     ngames++;
     games[ngames].path = strdup("__RESTART__");
     games[ngames].label = strdup("Restart console");
-    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD;
+    games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].badread = 0;
     ngames++;
 }
 
@@ -1787,6 +1802,7 @@ int main(int argc, char **argv)
     snprintf(localdb_path, sizeof localdb_path, "%.*sgamedb-local.csv", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(recent_path, sizeof recent_path, "%.*srecent.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(bios_dir, sizeof bios_dir, "%.*sbios", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(readcheck_path, sizeof readcheck_path, "%.*sread-check.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(saves_dir, sizeof saves_dir, "%.*ssaves", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     cart0 = (status_mode || ingame_mode) ? 0 : cart_state();
 
@@ -2099,18 +2115,19 @@ int main(int argc, char **argv)
                 fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
                 fill(list_x - W / 80, y, W / 200 + 2, row_h - 4, accent.r, accent.g, accent.b, 255);
             }
-            if (top + i < nreal && (g->recent || g->kind != K_HUCARD)) {
+            if (top + i < nreal && (g->recent || g->kind != K_HUCARD || g->badread)) {
                 static const char *kn[] = { "", "SGX", "CD" };
-                char tag[24];
-                snprintf(tag, sizeof tag, "%s%s%s", g->recent ? "Recent" : "", g->recent && g->kind ? "  " : "", kn[g->kind]);
-                text(f_hint, tag, dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+                char tag[40];
+                snprintf(tag, sizeof tag, "%s%s%s%s%s", g->badread ? "Bad read?" : "", g->badread && (g->recent || g->kind) ? "  " : "",
+                         g->recent ? "Recent" : "", g->recent && g->kind ? "  " : "", kn[g->kind]);
+                text(f_hint, tag, g->badread ? red : dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
             }
             if (top + i > 0 && top + i < nreal && !g->recent && games[top + i - 1].recent)
                 fill(list_x, y - 2, list_w, 1, 255, 255, 255, 60);      /* end of the recent block */
             if (g->tex) {
                 SDL_Rect dst = { list_x + W / 60, y + (row_h - 4 - g->th) / 2, g->tw, g->th };
                 SDL_Rect src;
-                int tagw = (g->recent ? W / 10 : 0) + (g->kind ? W / 20 : 0);
+                int tagw = (g->recent ? W / 10 : 0) + (g->kind ? W / 20 : 0) + (g->badread ? W / 8 : 0);
                 if (dst.w > list_w - W / 30 - tagw) dst.w = list_w - W / 30 - tagw;
                 src.x = 0; src.y = 0; src.w = dst.w; src.h = g->th;
                 SDL_SetTextureAlphaMod(g->tex, top + i == sel ? 255 : 190);
@@ -2130,6 +2147,7 @@ int main(int argc, char **argv)
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"
                                    : "I / RUN  Restart the console")
+                                  : games[sel].badread ? "Possible bad read: clean the HuCard and insert it again to replace this copy"
                                   : "I / RUN  Play       SELECT  Game options       Left/Right  Page",
              dim, W / 2, H * 91 / 100, 1);
 

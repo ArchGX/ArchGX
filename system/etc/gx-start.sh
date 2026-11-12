@@ -428,6 +428,13 @@ identify() {
 normalize() { pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP/raw.pce $TMP/cart.pce; }
 
 ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
+
+# read-check.txt: "file<TAB>state" (last line wins). state: unstable = the reads
+# differed; mismatch = the header names a known game but the checksum isn't
+# that game's; ok = fine. The picker marks the first two "Bad read?".
+READCHECK=$ROM/read-check.txt
+readcheck_of() { awk -F '\t' -v f="$(basename "$1")" '$1 == f { s = $2 } END { print s }' "$READCHECK" 2>/dev/null; }
+readcheck_set() { printf '%s\t%s\n' "$(basename "$1")" "$2" >> "$READCHECK"; }
 play_cart() {
 	status_show "Reading HuCard..." "" "-"          # the reader's own read: no progress visible
 	cart_ready 30 || { show_error "Could not read the HuCard" "Check the card and try again"; return; }
@@ -482,6 +489,20 @@ play_cart() {
 	for f in "$GAMES"/*.pce "$GAMES"/*.sgx; do             # same game already in the library?
 		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
 	done
+	# how good is this read?
+	rstate=ok
+	[ -n "$title" ] && ! crc_known "$crc" && rstate=mismatch
+	[ -n "$unstable" ] && rstate=unstable
+	# a copy of this game marked as a bad read is replaced by a good read
+	if [ -z "$game" ] && [ -n "$title" ] && [ $rstate = ok ]; then
+		for f in "$GAMES/$(safe_name "$title").pce" "$GAMES/$(safe_name "$title").sgx"; do
+			[ -f "$f" ] || continue
+			case "$(readcheck_of "$f")" in unstable|mismatch)
+				cp $TMP/cart.pce "$f.part" && mv "$f.part" "$f" && sync && {
+					readcheck_set "$f" ok; game=$f; log "cart: good read replaces the bad copy $(basename "$f")"; } ;;
+			esac
+		done
+	fi
 	new=""
 	if [ -z "$game" ]; then
 		if [ -n "$title" ]; then
@@ -493,15 +514,17 @@ play_cart() {
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
 		log "cart: new dump saved as $(basename "$game")"; new=1
+		[ $rstate = ok ] || { readcheck_set "$game" $rstate; log "cart: marked as a possible bad read ($rstate)"; }
 	fi
 	rm -f $TMP/raw.pce
 	# show the database title unless the user already named this file
 	if [ -n "$title" ] && ! awk -F '\t' -v f="$(basename "$game")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
 		set_title "$game" "$title"
 	fi
-	if [ -n "$unstable" ]; then
-		status_show "This HuCard reads unreliably" "If the game misbehaves, clean its contacts and insert it again" "" error; sleep 4
-	fi
+	case $rstate in
+	unstable) status_show "Bad read: this HuCard read differently each time" "Clean its contacts and insert it again. A good read replaces this copy" "" error; sleep 5 ;;
+	mismatch) status_show "Bad read? This doesn't match the known copy of $title" "Clean the HuCard's contacts and insert it again. A good read replaces this copy" "" error; sleep 5 ;;
+	esac
 	if [ -z "$title" ] && [ -n "$new" ] && [ "$ext" = pce ]; then
 		# unknown: let the player choose PC Engine, SuperGrafx or System Card
 		status_close; ASK_GAME=$game; return

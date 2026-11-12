@@ -1,5 +1,11 @@
 # Changelog
 
+## GP2-beta7: bad-read indicator
+
+- A cart read is checked two ways: **unstable** (two reads differed; settled by majority vote) and **mismatch** (the header names a known game but the checksum isn't that game's, so the read is probably damaged).
+- Either one shows a red message before the game starts and marks the game **Bad read?** in the library (red, with a hint to clean the HuCard and insert it again). Recorded in `read-check.txt` on the card.
+- Inserting the same cart again and getting a good read replaces the bad copy and clears the mark. Saves stay, because the file name doesn't change.
+
 ## GP2-beta6: reliable cart reads, easier SuperGrafx, composite colours
 
 From the GP2-beta4 hardware test:
