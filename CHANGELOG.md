@@ -1,5 +1,16 @@
 # Changelog
 
+## GP2-beta6: reliable cart reads, easier SuperGrafx, composite colours
+
+From the GP2-beta4 hardware test:
+- **Bad reads found:** the SuperGrafx carts that went to a white screen were damaged reads, not an emulation problem. Two reads of Aldynes gave two different checksums; the Daimakaimura read had 358 wrong bytes (bits 0x20/0x60 flipped) and still ran. The unrecognised System Cards were bad reads too (headers like `3838383822222222`).
+- **Verified reads:** a cart that isn't an exact database match is read a second time. If the two reads differ, a third read settles every byte by majority vote (`pce-normalize --vote`) and the console says the cart reads unreliably (clean the contacts). Exact matches still start straight away.
+- **SuperGrafx by name:** a cart identified by its header as a "(Super Grafx)" title is now filed as `.sgx` even when its checksum doesn't match.
+- **New HuCard chooser:** an unknown cart now asks how to run it: Play as PC Engine / Play as SuperGrafx / Use as CD System Card / Not now. No more black screen, quit, SELECT, change.
+- **Cart reader warning:** only for the cart reader, and only after it has been missing for 30 seconds in a row (it disconnects briefly at every cart change). The USB ports are shown in About only.
+- **Composite colours** (Options): the composite-video palette of both cores (`pce_fast_palette` / `sgx_palette`), applied live.
+- **Performance:** RetroArch's own frame-by-frame rewind (on in the stock config: a save state every 10 frames into a 20 MB buffer) is switched off. ArchGX's rewind is unaffected. This should reduce the CD skips (2.6 % dropped frames in Rondo of Blood and Lords of Thunder).
+
 ## GP2-beta5: copy CDs from a USB CD drive
 
 - New `cd-rip`: with a USB CD drive in a front port and a disc inserted, **Play the CD in the drive** appears in the library. The first time it copies the disc to `games/cd-<id>/` (one `.bin` per track plus a `.cue`, raw 2352-byte sectors), with a progress bar showing the track, speed and time left, then plays it. A disc copied before is recognised by its table of contents and plays straight away.

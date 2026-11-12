@@ -57,7 +57,7 @@
 
 enum { K_HUCARD, K_SGX, K_CD };
 typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; } Game;
-#define ARCHGX_VERSION "GP2-beta5"
+#define ARCHGX_VERSION "GP2-beta6"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -878,7 +878,7 @@ static const char *kb_special[] = { "abc", "Space", "Del", "Clear", "Done", "Can
 
 /* ---------------------------------------------------------------- main */
 
-enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT };
+enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT, M_ASK };
 static const char *opnames[6];
 
 /* ------------------------------------------------------ in-game menu */
@@ -949,12 +949,12 @@ static int ig_wait_file(const char *p, Uint32 timeout_ms)
 
 /* ---- settings ---- */
 #define NFILTERS 3                             /* Off, Scanlines, Composite TV */
-enum { OPT_ASPECT, OPT_FILTER, OPT_SMOOTH, OPT_VOLUME, OPT_FLICKER, OPT_TURBO1, OPT_TURBO2, OPT_N };
-static const char *opt_label[OPT_N] = { "Aspect ratio", "Screen filter", "Smoothing", "Volume",
+enum { OPT_ASPECT, OPT_FILTER, OPT_SMOOTH, OPT_PALETTE, OPT_VOLUME, OPT_FLICKER, OPT_TURBO1, OPT_TURBO2, OPT_N };
+static const char *opt_label[OPT_N] = { "Aspect ratio", "Screen filter", "Smoothing", "Composite colours", "Volume",
                                          "Reduce flicker", "Turbo I", "Turbo II" };
-static const char *opt_key[OPT_N] = { "aspect", "filter", "smooth", "volume", "flicker", "turbo1", "turbo2" };
-static const int opt_max[OPT_N] = { 1, NFILTERS - 1, 1, 10, 1, 1, 1 };
-static int opt_val[OPT_N] = { 0, 0, 0, 10, 0, 0, 0 };
+static const char *opt_key[OPT_N] = { "aspect", "filter", "smooth", "palette", "volume", "flicker", "turbo1", "turbo2" };
+static const int opt_max[OPT_N] = { 1, NFILTERS - 1, 1, 1, 10, 1, 1, 1 };
+static int opt_val[OPT_N] = { 0, 0, 0, 0, 10, 0, 0, 0 };
 static int opt_switch = -1;                    /* switch position when last seen */
 static int opt_dirty;                          /* changed in Options, not yet applied */
 /* CRT phosphor was removed in S2g-2: far too slow on this CPU. An old
@@ -1019,9 +1019,10 @@ static void settings_save(void)
     snprintf(tmp, sizeof tmp, "%s.new", RA_SET);
     if ((f = fopen(tmp, "w"))) {
         int vol = opt_val[OPT_VOLUME];
-        fprintf(f, "aspect=%d\nfilter=%s\nsmooth=%d\nvolume=%d\nsprites=%d\nturbo1=%d\nturbo2=%d\n",
+        fprintf(f, "aspect=%d\nfilter=%s\nsmooth=%d\nvolume=%d\nsprites=%d\nturbo1=%d\nturbo2=%d\npalette=%d\n",
                 opt_val[OPT_ASPECT], filter_files[opt_val[OPT_FILTER]], opt_val[OPT_SMOOTH],
-                vol == 0 ? -80 : (vol - 10) * 3, opt_val[OPT_FLICKER], opt_val[OPT_TURBO1], opt_val[OPT_TURBO2]);
+                vol == 0 ? -80 : (vol - 10) * 3, opt_val[OPT_FLICKER], opt_val[OPT_TURBO1], opt_val[OPT_TURBO2],
+                opt_val[OPT_PALETTE]);
         fclose(f);
         rename(tmp, RA_SET);
     }
@@ -1568,8 +1569,10 @@ static int run_ingame(const char *title)
 #define HW_READER   1
 #define HW_READER_X 2      /* a 2e25 device with another ID (update mode?) */
 #define HW_HUB      4
-#define HW_GRACE_S  20     /* seconds after power-on before warning */
+#define HW_GRACE_S  20     /* seconds after power-on before checking */
+#define HW_WARN_S   30     /* the reader re-connects at every cart change: warn only after 30 s missing */
 static int hw_flags = HW_READER | HW_HUB, hw_checked;
+static double hw_missing_since, hw_up;
 
 static int read_hex(const char *path)
 {
@@ -1609,24 +1612,26 @@ static int hw_check(void)
     FILE *f = fopen("/proc/uptime", "r");
     int old = hw_flags;
     if (f) { if (fscanf(f, "%lf", &up) != 1) up = 0; fclose(f); }
+    hw_up = up;
     if (up < HW_GRACE_S) return 0;
     hw_flags = hw_scan();
+    if (hw_flags & HW_READER) hw_missing_since = 0;
+    else if (!hw_missing_since) hw_missing_since = up;
     if (!hw_checked || hw_flags != old) {
         hw_checked = 1;
         if (!(hw_flags & HW_READER)) SDL_Log("hardware: cart reader not found%s", hw_flags & HW_READER_X ? " (a BTE device with another ID is present)" : "");
         if (!(hw_flags & HW_HUB)) SDL_Log("hardware: front USB ports (hub) not found");
         return hw_flags != old;
     }
-    return 0;
+    return !(hw_flags & HW_READER);     /* keep redrawing while the 30 s run */
 }
 
 static const char *hw_warning(void)
 {
-    if (!(hw_flags & HW_READER))
+    if (!(hw_flags & HW_READER) && hw_missing_since && hw_up - hw_missing_since >= HW_WARN_S)
         return hw_flags & HW_READER_X ? "Cart reader is in update mode: restart the console"
                                       : "Cart reader not found: HuCards and the controller ports won't work";
-    if (!(hw_flags & HW_HUB)) return "Front USB ports not found";
-    return NULL;
+    return NULL;        /* the front USB ports are shown in About only */
 }
 
 static void draw_about(void)
@@ -1820,6 +1825,9 @@ int main(int argc, char **argv)
     row_h = H / 15; list_y = H * 22 / 100; list_x = W / 10; list_w = W - 2 * list_x;
     rows = (H * 66 / 100) / row_h;
     sel = load_last();
+    if (getenv("PCE_LAUNCHER_ASK") && (i = find_game(getenv("PCE_LAUNCHER_ASK"))) >= 0) {
+        sel = i; mode = M_ASK; opt = 0;          /* a new unknown HuCard: how to play it? */
+    }
 
     if (getenv("PCE_LAUNCHER_KEYS")) {
         char buf[1024], *t;
@@ -1917,6 +1925,32 @@ int main(int argc, char **argv)
                     save_last(games[sel].path);
                     SDL_Log("exit: chose %s (%s)", games[sel].path, opt == 0 ? "resume" : "new game");
                     _exit(0);
+                }
+            } else if (mode == M_ASK) {
+                if (a == A_UP && opt > 0) opt--;
+                else if (a == A_DOWN && opt < 3) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == 3)) mode = M_LIST;
+                else if (a == A_OK || a == A_RUN) {
+                    char np[1024], bn[64];
+                    const char *play = NULL;
+                    if (opt == 0) play = games[sel].path;
+                    else if (opt == 1) {
+                        if (set_kind(sel, 1, np, sizeof np) == 0) play = np;
+                        else { snprintf(msg, sizeof msg, "Could not change the game"); mode = M_MESSAGE; msg_until = now + 2500; }
+                    } else {
+                        if (use_as_bios(sel, bn, sizeof bn) == 0) snprintf(msg, sizeof msg, "Saved as CD System Card (bios/%s)", bn);
+                        else snprintf(msg, sizeof msg, "Could not save it as a System Card");
+                        scan_library();
+                        if (sel >= ngames) sel = ngames - 1;
+                        mode = M_MESSAGE; msg_until = now + 3000;
+                    }
+                    if (play) {
+                        FILE *f = fopen(argv[2], "w");
+                        if (f) { fprintf(f, "%s\n", play); fclose(f); }
+                        save_last(play);
+                        SDL_Log("exit: chose %s (new HuCard)", play);
+                        _exit(0);
+                    }
                 }
             } else if (mode == M_OPTIONS) {
                 int ops[6], nops = game_ops(games[sel].kind, ops, (const char **)opnames);
@@ -2158,6 +2192,17 @@ int main(int argc, char **argv)
                 }
             }
             text(f_hint, "I  Type      II  Erase      RUN  Done      SELECT  Cancel", dim, px + pw / 2, py + ph - row_h * 3 / 4, 1);
+        } else if (mode == M_ASK) {
+            static const char *items[] = { "Play as PC Engine", "Play as SuperGrafx", "Use as CD System Card", "Not now" };
+            int pw = W * 56 / 100, ph = row_h * 7, px, py;
+            panel(pw, ph, &px, &py);
+            text(f_item, "New HuCard, not in the game database", white, px + pw / 2, py + row_h / 4, 1);
+            text(f_hint, "How should it run? (SELECT changes it later)", dim, px + pw / 2, py + row_h, 1);
+            for (i = 0; i < 4; i++) {
+                int y = py + row_h * (i + 2) + row_h / 4;
+                if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
+                text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+            }
         } else if (mode == M_MESSAGE) {
             int pw = W * 60 / 100, ph = row_h * 2, px, py;
             panel(pw, ph, &px, &py);

@@ -62,8 +62,35 @@ static int vector_score(const unsigned char *d, size_t n, int reversed)
     return score;
 }
 
+/* pce-normalize --vote a b c out: byte-wise majority of three reads of the
+ * same cart (the reader's reads can differ by a few bits on worn contacts).
+ * Prints how many bytes needed the vote. */
+static int vote(char **f)
+{
+    FILE *in[3], *o;
+    long n[3], i, fixed = 0, bad = 0;
+    int k;
+    for (k = 0; k < 3; k++) {
+        if (!(in[k] = fopen(f[k], "rb"))) { perror(f[k]); return 1; }
+        fseek(in[k], 0, SEEK_END); n[k] = ftell(in[k]); rewind(in[k]);
+    }
+    if (n[0] != n[1] || n[0] != n[2]) { fprintf(stderr, "vote: sizes differ\n"); return 1; }
+    if (!(o = fopen(f[3], "wb"))) { perror(f[3]); return 1; }
+    for (i = 0; i < n[0]; i++) {
+        int a = fgetc(in[0]), b = fgetc(in[1]), c = fgetc(in[2]), r;
+        if (a == b || a == c) r = a; else if (b == c) r = b; else { r = a; bad++; }
+        if (a != b || a != c) fixed++;
+        fputc(r, o);
+    }
+    for (k = 0; k < 3; k++) fclose(in[k]);
+    if (fclose(o) != 0) return 1;
+    printf("vote: %ld bytes differed between reads, %ld with no majority\n", fixed, bad);
+    return bad ? 2 : 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 6 && !strcmp(argv[1], "--vote")) return vote(argv + 2);
     FILE *f;
     unsigned char *buf, *d;
     size_t n, i;

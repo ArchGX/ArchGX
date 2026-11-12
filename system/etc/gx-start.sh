@@ -311,8 +311,10 @@ apply_settings() {
 	EOC
 	[ "$(setting flicker 0)" = 1 ] && spr=enabled || spr=disabled
 	core_opt pce_nospritelimit "$spr"; core_opt sgx_nospritelimit "$spr"
+	[ "$(setting palette 0)" = 1 ] && pal=Composite || pal=RGB
+	core_opt pce_fast_palette "$pal"; core_opt sgx_palette "$pal"
 	printf 'turbo1=%s\nturbo2=%s\n' "$(setting turbo1 0)" "$(setting turbo2 0)" > $TMP/ra-set
-	log "settings: aspect=$aspect filter=${filt##*/} smooth=$smooth volume=$vol flicker=$spr turbo=$(setting turbo1 0)/$(setting turbo2 0)"
+	log "settings: aspect=$aspect filter=${filt##*/} smooth=$smooth volume=$vol flicker=$spr palette=$pal turbo=$(setting turbo1 0)/$(setting turbo2 0)"
 }
 
 # move a game to the top of the recently played list (file names, newest first)
@@ -392,40 +394,76 @@ run_retroarch_menu() {
 }
 
 # copy the reader's dump in 32 KB pieces, reporting the real percentage
+# ($3 = message; progress runs over the whole copy)
 copy_dump() {
 	size=$(stat -c %s "$CART_FILE" 2>/dev/null) || return 1
 	[ "$size" -gt 0 ] || return 1
 	rm -f "$2"; n=$(( (size + 32767) / 32768 )); i=0
 	while [ $i -lt $n ]; do
 		dd if="$1" of="$2" bs=32768 skip=$i seek=$i count=1 conv=notrunc 2>/dev/null || return 1
-		i=$((i+1)); status "Reading HuCard..." "" $((i * 100 / n)) ""
+		i=$((i+1)); status "${3:-Reading HuCard...}" "" $((i * 100 / n)) ""
 	done
 	[ "$(stat -c %s "$2")" = "$size" ]
 }
 
-play_cart() {
-	status_show "Reading HuCard..." "" "-"          # the reader's own read: no progress visible
-	cart_ready 30 || { show_error "Could not read the HuCard" "Check the card and try again"; return; }
-	copy_dump "$CART_FILE" $TMP/raw.pce || { rm -f $TMP/raw.pce; show_error "Could not read the HuCard" "Check the card and try again"; return; }
-	cp "${CART_FILE%.pce}.crc" $LOGD/last-cart.crc 2>/dev/null   # reader's own .crc file, kept for study
-	status "Identifying game..." "" "-" ""
-	pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP/raw.pce $TMP/cart.pce || { show_error "Could not prepare the game"; return; }
+# is this CRC32 an exact entry in the game database (local or built-in)?
+crc_known() {
+	cat "$LOCAL_DB" "$BASE_DB" 2>/dev/null | tr -d '"\r' | tr 'A-F' 'a-f' |
+		grep -q -E "^(0x)?0*$(echo "$1" | sed 's/^0*//')[,;]"
+}
+
+# identify $TMP/cart.pce: sets crc hdr title crc256 crc512 sc
+identify() {
 	crc=$(crc32_of $TMP/cart.pce); hdr=$(header_of $TMP/raw.pce)
 	title=$(db_title "$crc" "$hdr")
-	if [ -n "$title" ]; then log "cart: identified as \"$title\" (crc32 $crc, header $hdr)"
-	else log "cart: not in the game database (crc32 $crc, header $hdr)"; fi
 	# The reader may dump more than the card holds (a System Card's RAM area
 	# reads as noise), so also try the checksum of the first 256 KB / 512 KB.
 	sz=$(stat -c %s $TMP/cart.pce); crc256=""; crc512=""
 	[ "$sz" -gt 262144 ] && { head -c 262144 $TMP/cart.pce > $TMP/pfx; crc256=$(crc32_of $TMP/pfx); }
 	[ "$sz" -gt 524288 ] && { head -c 524288 $TMP/cart.pce > $TMP/pfx; crc512=$(crc32_of $TMP/pfx); }
 	rm -f $TMP/pfx
-	[ -n "$crc256" ] && log "cart: first 256 KB crc32 $crc256${crc512:+, first 512 KB crc32 $crc512}"
-	sc=$(syscard_file "$crc")
-	if [ -z "$sc" ] && [ -n "$crc256" ] && [ -n "$(syscard_file "$crc256")" ]; then
-		sc=$(syscard_file "$crc256"); head -c 262144 $TMP/cart.pce > $TMP/cart.trim && mv $TMP/cart.trim $TMP/cart.pce
+	sc=$(syscard_file "$crc"); [ -z "$sc" ] && [ -n "$crc256" ] && sc=$(syscard_file "$crc256")
+}
+
+normalize() { pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP/raw.pce $TMP/cart.pce; }
+
+ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
+play_cart() {
+	status_show "Reading HuCard..." "" "-"          # the reader's own read: no progress visible
+	cart_ready 30 || { show_error "Could not read the HuCard" "Check the card and try again"; return; }
+	copy_dump "$CART_FILE" $TMP/raw.pce || { rm -f $TMP/raw.pce; show_error "Could not read the HuCard" "Check the card and try again"; return; }
+	cp "${CART_FILE%.pce}.crc" $LOGD/last-cart.crc 2>/dev/null   # reader's own .crc file, kept for study
+	status "Identifying game..." "" "-" ""
+	normalize || { show_error "Could not prepare the game"; return; }
+	identify
+	unstable=""
+	# Worn contacts can flip bits. Anything that isn't an exact database match
+	# is read again; if the two reads differ, a third read settles every byte
+	# by majority vote.
+	sgxc=""; case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) sgxc=1 ;; esac
+	if [ -z "$sc" ] && [ -z "$sgxc" ] && ! crc_known "$crc"; then
+		cp $TMP/raw.pce $TMP/raw1.pce
+		sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null   # read the cart again, not the cache
+		if copy_dump "$CART_FILE" $TMP/raw2.pce "Checking the read..."; then
+			if cmp -s $TMP/raw1.pce $TMP/raw2.pce; then
+				log "cart: second read identical"
+			else
+				log "cart: second read differs, reading a third time"
+				sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+				if copy_dump "$CART_FILE" $TMP/raw3.pce "Checking the read again..."; then
+					pce-normalize --vote $TMP/raw1.pce $TMP/raw2.pce $TMP/raw3.pce $TMP/raw.pce >> "$LOG" 2>&1
+					[ $? -le 2 ] || cp $TMP/raw1.pce $TMP/raw.pce
+					unstable=1; normalize; identify
+				fi
+			fi
+		fi
+		rm -f $TMP/raw1.pce $TMP/raw2.pce $TMP/raw3.pce
 	fi
+	if [ -n "$title" ]; then log "cart: identified as \"$title\" (crc32 $crc, header $hdr)"
+	else log "cart: not in the game database (crc32 $crc, header $hdr)"; fi
+	[ -n "$crc256" ] && log "cart: first 256 KB crc32 $crc256${crc512:+, first 512 KB crc32 $crc512}"
 	if [ -n "$sc" ]; then                          # a System Card: keep it as the CD BIOS
+		[ "$(syscard_file "$crc")" = "$sc" ] || { head -c 262144 $TMP/cart.pce > $TMP/cart.trim && mv $TMP/cart.trim $TMP/cart.pce; }
 		mkdir -p "$BIOS_DIR"
 		if cp $TMP/cart.pce "$BIOS_DIR/$sc.part" && mv "$BIOS_DIR/$sc.part" "$BIOS_DIR/$sc" && sync; then
 			log "cart: System Card saved as bios/$sc"
@@ -437,11 +475,14 @@ play_cart() {
 		return
 	fi
 	status "Preparing game..." "${title:-Unknown HuCard ($crc)}" "-" ""
-	ext=pce; case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) ext=sgx ;; esac   # SuperGrafx HuCard
+	ext=pce
+	case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) ext=sgx ;; esac   # SuperGrafx HuCard
+	case "$title" in *"Super Grafx)"*|*"(SGX)"*) ext=sgx ;; esac      # ... or named so in the database
 	s=$(stat -c %s $TMP/cart.pce); game=""
 	for f in "$GAMES"/*.pce "$GAMES"/*.sgx; do             # same game already in the library?
 		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
 	done
+	new=""
 	if [ -z "$game" ]; then
 		if [ -n "$title" ]; then
 			game="$GAMES/$(safe_name "$title").$ext"
@@ -451,12 +492,19 @@ play_cart() {
 		fi
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
-		log "cart: new dump saved as $(basename "$game")"
+		log "cart: new dump saved as $(basename "$game")"; new=1
 	fi
 	rm -f $TMP/raw.pce
 	# show the database title unless the user already named this file
 	if [ -n "$title" ] && ! awk -F '\t' -v f="$(basename "$game")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
 		set_title "$game" "$title"
+	fi
+	if [ -n "$unstable" ]; then
+		status_show "This HuCard reads unreliably" "If the game misbehaves, clean its contacts and insert it again" "" error; sleep 4
+	fi
+	if [ -z "$title" ] && [ -n "$new" ] && [ "$ext" = pce ]; then
+		# unknown: let the player choose PC Engine, SuperGrafx or System Card
+		status_close; ASK_GAME=$game; return
 	fi
 	touch $TMP/cart_game; run_game "$game"; rm -f $TMP/cart_game
 }
@@ -570,6 +618,7 @@ done
 fails=0
 while :; do
 	if [ -f "$CART_FILE" ]; then export PCE_LAUNCHER_CART=1; else unset PCE_LAUNCHER_CART; fi
+	if [ -n "$ASK_GAME" ]; then export PCE_LAUNCHER_ASK="$ASK_GAME"; ASK_GAME=""; else unset PCE_LAUNCHER_ASK; fi
 	rm -f $TMP/choice
 	/usr/bin/pce-launcher "$GAMES" $TMP/choice >> $LOGD/launcher.log 2>&1
 	rc=$?; sync; choice=$(head -1 $TMP/choice 2>/dev/null); how=$(sed -n 2p $TMP/choice 2>/dev/null)
