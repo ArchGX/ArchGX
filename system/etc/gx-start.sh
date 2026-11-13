@@ -6,7 +6,8 @@
 # Started by rcS once Weston is up. Replaces Hyperkin's check_firmware,
 # tgdumper-loading, menu and shell scripts. Uses ArchGX's own tools
 # (pce-launcher, pce-normalize, fix_storage.sh, ArchGX's RetroArch build)
-# plus the console's existing Beetle PCE Fast core.
+# plus the console's existing Beetle PCE Fast core (HuCards, CD games) and
+# ArchGX's build of Beetle SuperGrafx (SuperGrafx games).
 #
 #   cart in the slot  -> dump is cleaned, identified (gamedb), filed in games/, played
 #   no cart           -> game picker; the chosen game is played
@@ -16,7 +17,11 @@
 # Logs (FAT partition): logs/gx-start.log, logs/retroarch.log (last game)
 #
 # Card layout (FAT partition, /userdata/rom):
-#   games/              ROMs. A file name never changes once created.
+#   games/              ROMs. A file name never changes once created. HuCards (.pce),
+#                       SuperGrafx (.sgx) and CD games (.cue/.chd/.ccd/.m3u, loose
+#                       or one folder per game)
+#   bios/               CD System Card (syscard3.pce etc.); a System Card in the
+#                       slot is saved here
 #   saves/              battery saves (.srm) and save states, named after the ROM file
 #   titles.txt          "file<TAB>title": names shown in the picker (Rename edits this)
 #   archgx-settings.cfg Options menu choices
@@ -37,6 +42,8 @@ FILTER_DIR=/usr/lib/retroarch/filters/video
 CART_MNT=/media/usb1                 # pce-launcher watches this path
 CART_FILE=$CART_MNT/Test_pcengine.pce
 CORE=/usr/lib/libretro/beetlepcefast_libretro.so
+SGX_CORE=/usr/lib/libretro/mednafen_supergrafx_libretro.so   # ArchGX build (GP2)
+SYS_DIR=/userdata                    # RetroArch system directory: the cores look for BIOS files here
 RA_CFG=/userdata/retroarch/retroarch.cfg
 CORE_OPTS=/userdata/retroarch/retroarch-core-options.cfg
 GX_RA_CFG=/etc/gx-retroarch.cfg      # our settings on top of the stock config (saves folder, simple menu)
@@ -46,6 +53,7 @@ RA_DIR=/userdata/retroarch           # rcS copies RA_STORE here (RAM) at every b
 RA_STORE=/userdata/retroarch_org     # persistent copy on the userdata partition
 ROM=/userdata/rom
 SAVES=$ROM/saves
+BIOS_DIR=$ROM/bios
 TITLES=$ROM/titles.txt
 LOCAL_DB=$ROM/gamedb-local.csv
 SETTINGS=$ROM/archgx-settings.cfg      # Options menu choices (aspect, filter, volume...)
@@ -126,7 +134,52 @@ core_opt() {
 		echo "$1 = \"$2\"" >> "$CORE_OPTS"
 	fi
 }
-set_core_defaults() { core_opt pce_disable_softreset enabled; }
+set_core_defaults() {
+	core_opt pce_disable_softreset enabled
+	core_opt sgx_disable_softreset enabled
+	core_opt sgx_forcesgx enabled           # only SuperGrafx games are sent to this core
+}
+
+# What a library file is: hucard, sgx or cd. SuperGrafx HuCards are known by
+# their .sgx name or their CRC32 (the core's own list plus our gamedb).
+SGX_CRCS="8c4588e2 d206e241 4c2126b0 3b13af61 b486a8ed 1f041166 bebfe042 86c295a0"
+game_kind() {
+	case "$1" in
+	*.[cC][uU][eE]|*.[cC][hH][dD]|*.[cC][cC][dD]|*.[mM]3[uU]|*.[tT][oO][cC]) echo cd ;;
+	*.[sS][gG][xX]) echo sgx ;;
+	*)	c=$(crc32_of "$1")
+		case " $SGX_CRCS " in *" $c "*) echo sgx ;; *) echo hucard ;; esac ;;
+	esac
+}
+
+# CD games need a System Card image. Use the best one found in bios/ (or
+# already in the system folder), copy it where the cores look, and choose it.
+# Prints the option value ("System Card 3") or nothing if there is none.
+cd_bios() {
+	mkdir -p "$BIOS_DIR"
+	for e in "syscard3.pce:System Card 3" "syscard3u.pce:System Card 3 US" \
+	         "syscard2.pce:System Card 2" "syscard2u.pce:System Card 2 US" "syscard1.pce:System Card 1"; do
+		f=${e%%:*}
+		if [ -f "$BIOS_DIR/$f" ]; then
+			cmp -s "$BIOS_DIR/$f" "$SYS_DIR/$f" || cp "$BIOS_DIR/$f" "$SYS_DIR/$f" || continue
+		fi
+		[ -f "$SYS_DIR/$f" ] && { echo "${e#*:}"; return 0; }
+	done
+	[ -f "$BIOS_DIR/gexpress.pce" ] && cp "$BIOS_DIR/gexpress.pce" "$SYS_DIR/" 2>/dev/null
+	return 1
+}
+
+# System Card HuCards (normalized CRC32) -> BIOS file name
+syscard_file() {
+	case "$1" in
+	6d9a73ef) echo syscard3.pce ;;
+	2b5b75fe) echo syscard3u.pce ;;
+	52520bc6|283b74e0) echo syscard2.pce ;;
+	ff2a5ec3) echo syscard2u.pce ;;
+	3f9f95a4) echo syscard1.pce ;;
+	51a12d90) echo gexpress.pce ;;
+	esac
+}
 
 # CRC32 of a file (gzip stores it in its trailer) and the raw header bytes at 0x200
 crc32_of() { gzip -c "$1" | tail -c 8 | head -c 4 | hexdump -e '1/4 "%08x"'; }
@@ -191,6 +244,35 @@ title_of() {
 set_title() { printf '%s\t%s\n' "$(basename "$1")" "$2" >> "$TITLES"; }
 
 # FAT-safe file name from a title
+# the library's own folders (also the picker's tabs)
+F_PCE="$GAMES/PC Engine"; F_TG="$GAMES/TurboGrafx-16"; F_SGX="$GAMES/SuperGrafx"; F_CD="$GAMES/CD Games"
+# where a new dump goes: SuperGrafx, TurboGrafx-16 (bit-swapped cart) or PC Engine
+game_folder() {
+	if [ "$1" = sgx ]; then echo "$F_SGX"; elif [ -n "$tg16" ]; then echo "$F_TG"; else echo "$F_PCE"; fi
+}
+# Games dropped loose in games/ (copied from a computer or a USB stick) are
+# moved into the library's folders; folders and files elsewhere stay put.
+sort_root() {
+	sn=0
+	for f in "$GAMES"/*; do
+		[ -e "$f" ] || continue
+		b=$(basename "$f"); dst=""
+		case "$b" in "PC Engine"|"TurboGrafx-16"|SuperGrafx|"CD Games") continue ;; esac
+		if [ -d "$f" ]; then
+			for c in "$f"/*.cue "$f"/*.chd "$f"/*.ccd "$f"/*.m3u; do [ -f "$c" ] && dst=$F_CD; done   # a CD game's folder
+		else
+			case "$b" in
+			*.sgx|*.SGX) dst=$F_SGX ;;
+			*"(USA)"*.pce|*"(U)"*.pce|*"(US)"*.pce|*"(USA)"*.PCE|*"(U)"*.PCE) dst=$F_TG ;;
+			*.pce|*.PCE) dst=$F_PCE ;;
+			*.chd|*.CHD) dst=$F_CD ;;               # one-file CD images (a loose .cue needs its tracks: left alone)
+			esac
+		fi
+		[ -n "$dst" ] && [ ! -e "$dst/$b" ] && mv "$f" "$dst/" && sn=$((sn+1))
+	done
+	[ $sn -gt 0 ] && { sync; log "library: moved $sn game(s) into the system folders"; }
+}
+
 safe_name() { echo "$1" | sed 's#[\\/:*?"<>|]#-#g; s/[. ]*$//'; }
 
 # ------------------------------------------------------- progress screen
@@ -229,6 +311,9 @@ persist_ra() {
 
 # Options-menu settings -> RetroArch config for this launch (+ /tmp/gx/ra-set for
 # the turbo buttons). The front switch wins if it moved since the last change.
+# Debug screen (hidden: hold SELECT on About): debug.cfg, written by the picker
+DEBUG_CFG=$ROM/debug.cfg
+debug_opt() { v=$(sed -n "s/^$1=//p" "$DEBUG_CFG" 2>/dev/null | tr -d '\r' | tail -1); echo "${v:-$2}"; }
 setting() { v=$(sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tr -d '\r' | tail -1); echo "${v:-$2}"; }
 apply_settings() {
 	aspect=$(setting aspect ""); sw=$(setting switch -1)
@@ -255,11 +340,19 @@ apply_settings() {
 		video_filter = "$filt"
 		video_smooth = "$sm"
 		audio_volume = "$db"
+		autosave_interval = "60"
 	EOC
+	# autosave: RetroArch writes battery saves (CD backup RAM) every minute from
+	# its own thread; run_game flushes them to the card. Debug: FPS counter.
+	if [ "$(debug_opt fps 0)" = 1 ]; then
+		printf 'fps_show = "true"\nvideo_font_enable = "true"\n' >> $GX_SET_CFG
+	fi
 	[ "$(setting flicker 0)" = 1 ] && spr=enabled || spr=disabled
-	core_opt pce_nospritelimit "$spr"
+	core_opt pce_nospritelimit "$spr"; core_opt sgx_nospritelimit "$spr"
+	[ "$(setting palette 0)" = 1 ] && pal=Composite || pal=RGB
+	core_opt pce_fast_palette "$pal"; core_opt sgx_palette "$pal"
 	printf 'turbo1=%s\nturbo2=%s\n' "$(setting turbo1 0)" "$(setting turbo2 0)" > $TMP/ra-set
-	log "settings: aspect=$aspect filter=${filt##*/} smooth=$smooth volume=$vol flicker=$spr turbo=$(setting turbo1 0)/$(setting turbo2 0)"
+	log "settings: aspect=$aspect filter=${filt##*/} smooth=$smooth volume=$vol flicker=$spr palette=$pal turbo=$(setting turbo1 0)/$(setting turbo2 0)"
 }
 
 # move a game to the top of the recently played list (file names, newest first)
@@ -283,7 +376,13 @@ ensure_display() {
 
 run_game() {
 	title=$(title_of "$1")
-	base=$(basename "$1" .pce)
+	base=$(basename "$1"); base=${base%.*}
+	kind=$(game_kind "$1"); core=$CORE; bios=""
+	case $kind in
+	sgx) if [ -f "$SGX_CORE" ]; then core=$SGX_CORE; else log "SuperGrafx core missing, using PCE core"; fi ;;
+	cd)  if bios=$(cd_bios); then core_opt pce_fast_cdbios "$bios"; core_opt sgx_cdbios "$bios"
+	     else show_error "CD games need a System Card" "Put syscard3.pce in the bios folder, or insert a System Card"; return; fi ;;
+	esac
 	mkdir -p $STATES_TMP; rm -f $STATES_TMP/*
 	apply_settings
 	cfgs="$GX_RA_CFG|$GX_SET_CFG"
@@ -293,7 +392,7 @@ run_game() {
 			cfgs="$cfgs|$GX_RESUME_CFG"; log "resume from $(basename "$st")"
 		fi
 	fi
-	log "play: $1 ($title)"
+	log "play: $1 ($title) [$kind${bios:+, $bios}]"
 	mark_recent "$1"
 	set_core_defaults
 	echo "$title" > /tmp/SelectGame.txt      # read by the console's Beetle core (per-game input code)
@@ -302,7 +401,7 @@ run_game() {
 	# kept open here (fd 3) so RetroArch never sees end-of-file
 	[ -f $LOGD/retroarch.log ] && mv $LOGD/retroarch.log $LOGD/retroarch.log.1 2>/dev/null
 	rm -f $RA_FIFO; mkfifo $RA_FIFO; exec 3<>$RA_FIFO
-	/usr/bin/retroarch -v -c $RA_CFG --appendconfig "$cfgs" -L $CORE "$1" < $RA_FIFO > $LOGD/retroarch.log 2>&1 &
+	/usr/bin/retroarch -v -c $RA_CFG --appendconfig "$cfgs" -L $core "$1" < $RA_FIFO > $LOGD/retroarch.log 2>&1 &
 	ra=$!
 	# no measurable load progress: keep the spinner until RetroArch shows the game
 	n=0; started=""
@@ -316,13 +415,32 @@ run_game() {
 		/usr/bin/pce-launcher --ingame $RA_FIFO "$SAVES/$base" "$title" >> $LOGD/ingame.log 2>&1 &
 		ig=$!
 	fi
+	# power can be cut at any moment: flush autosaves to the card every minute
+	( while sleep 60; do sync; done ) & syncer=$!
+	[ "$(debug_opt usbpause 1)" = 1 ] && touch $TMP/usb_pause    # the USB log waits while a game runs
 	wait $ra; rc=$?
+	kill $syncer 2>/dev/null; rm -f $TMP/usb_pause; sync
 	[ -n "$ig" ] && kill $ig 2>/dev/null
 	exec 3>&-; rm -f $RA_FIFO
 	rm -f $STATES_TMP/*; persist_ra
 	log "game ended (retroarch exit $rc)"
+	session_stats "$title" $rc
 	ensure_display
 	[ -z "$started" ] && show_error "Could not start $title" "See logs/retroarch.log"
+}
+
+# dropped frames (RetroArch prints them when it closes): one line per game in
+# gx-start.log, and logs/last-session.txt for the Debug screen
+session_stats() {
+	fr=$(grep -a "Threaded video stats" $LOGD/retroarch.log 2>/dev/null | tail -1 |
+		sed -n 's/.*pushed: *\([0-9]*\).*dropped: *\([0-9]*\).*/\1 \2/p')
+	set -- "$1" "$2" $fr
+	case $2 in 0) ex="clean" ;; 139) ex="crashed while closing (139)" ;; *) ex="exit code $2" ;; esac
+	if [ -n "$3" ] && [ "$3" -gt 0 ]; then
+		pm=$(( $4 * 1000 / $3 )); fs="$4 of $3 frames dropped ($((pm / 10)).$((pm % 10))%)"
+	else fs="no frame count"; fi
+	log "frames: $fs"
+	printf '%s\n%s\n%s\n' "$1" "$fs" "$ex" > $LOGD/last-session.txt
 }
 
 # "RetroArch (advanced)" in the picker: the full RetroArch menu, no game loaded
@@ -333,58 +451,356 @@ run_retroarch_menu() {
 }
 
 # copy the reader's dump in 32 KB pieces, reporting the real percentage
+# ($3 = message; progress runs over the whole copy)
 copy_dump() {
 	size=$(stat -c %s "$CART_FILE" 2>/dev/null) || return 1
 	[ "$size" -gt 0 ] || return 1
 	rm -f "$2"; n=$(( (size + 32767) / 32768 )); i=0
 	while [ $i -lt $n ]; do
 		dd if="$1" of="$2" bs=32768 skip=$i seek=$i count=1 conv=notrunc 2>/dev/null || return 1
-		i=$((i+1)); status "Reading HuCard..." "" $((i * 100 / n)) ""
+		i=$((i+1)); status "${3:-Reading HuCard...}" "" $((i * 100 / n)) ""
 	done
 	[ "$(stat -c %s "$2")" = "$size" ]
 }
 
+# is this CRC32 an exact entry in the game database (local or built-in)?
+crc_known() {
+	cat "$LOCAL_DB" "$BASE_DB" 2>/dev/null | tr -d '"\r' | tr 'A-F' 'a-f' |
+		grep -q -E "^(0x)?0*$(echo "$1" | sed 's/^0*//')[,;]"
+}
+
+# A cart that isn't an exact database match may still be a known game in a
+# non-standard form: a smaller game in a bigger read (a 768 KB game reads as
+# 1 MB; flash carts hold leftovers after the game) or a region-free patch
+# (huconv.py and others). Try those forms; the first known checksum becomes
+# the dump, so saved games are standard ROMs.
+std_form() {
+	sz=$(stat -c %s $TMP/cart.pce)
+	for len in $sz 786432 524288 393216 262144; do
+		[ "$len" -le "$sz" ] || continue
+		head -c "$len" $TMP/cart.pce > $TMP/std
+		for v in - f0 d0; do
+			[ "$len" = "$sz" ] && [ $v = - ] && continue          # already checked
+			if [ $v = - ]; then cp $TMP/std $TMP/std2
+			else pce-normalize --unregion $TMP/std $TMP/std2 $v 2>/dev/null || continue; fi
+			k=$(crc32_of $TMP/std2)
+			if crc_known "$k"; then
+				mv $TMP/std2 $TMP/cart.pce; rm -f $TMP/std
+				r=""; [ $v = - ] || r=", region byte $v"
+				log "cart: standard form found ($len bytes$r) crc32 $k"
+				crc=$k; return 0
+			fi
+		done
+	done
+	rm -f $TMP/std $TMP/std2; return 1
+}
+
+# identify $TMP/cart.pce: sets crc hdr title crc256 crc512 sc
+identify() {
+	crc=$(crc32_of $TMP/cart.pce); hdr=$(header_of $TMP/raw.pce)
+	crc_known "$crc" || std_form
+	title=$(db_title "$crc" "$hdr")
+	# The reader may dump more than the card holds (a System Card's RAM area
+	# reads as noise), so also try the checksum of the first 256 KB / 512 KB.
+	sz=$(stat -c %s $TMP/cart.pce); crc256=""; crc512=""
+	[ "$sz" -gt 262144 ] && { head -c 262144 $TMP/cart.pce > $TMP/pfx; crc256=$(crc32_of $TMP/pfx); }
+	[ "$sz" -gt 524288 ] && { head -c 524288 $TMP/cart.pce > $TMP/pfx; crc512=$(crc32_of $TMP/pfx); }
+	rm -f $TMP/pfx
+	sc=$(syscard_file "$crc"); [ -z "$sc" ] && [ -n "$crc256" ] && sc=$(syscard_file "$crc256")
+}
+
+# tg16=1 when the cart's data came bit-swapped: a US TurboGrafx-16 HuCard
+normalize() {
+	pce-normalize $TMP/raw.pce $TMP/cart.pce > $TMP/norm.out 2>&1 || cp $TMP/raw.pce $TMP/cart.pce
+	cat $TMP/norm.out >> "$LOG"
+	tg16=""; grep -q "TG16 bit-swapped" $TMP/norm.out && tg16=1
+}
+
+ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
+
+# read-check.txt: "file<TAB>state<TAB>crc32" (last line wins), one line per
+# HuCard in the library. state: ok = matches the game database (green in the
+# picker); mismatch = the header names a known game but the checksum differs:
+# a hack, a revision or a bad read (yellow); unknown = not in the database
+# (grey). Lines from beta7 have no checksum and are checked again.
+READCHECK=$ROM/read-check.txt
+readcheck_of() { awk -F '\t' -v f="$(basename "$1")" '$1 == f { s = $2 } END { print s }' "$READCHECK" 2>/dev/null; }
+readcheck_set() { printf '%s\t%s\t%s\n' "$(basename "$1")" "$2" "$3" >> "$READCHECK"; }
+
+# check every HuCard in the library that has no read-check line yet (games
+# copied from a computer, renamed ones, beta7 lines): only new files cost
+# time, and only here in the menu, never while a game runs
+verify_library() {
+	todo=$TMP/verify.todo
+	awk -F '\t' 'NF >= 3 { print $1 }' "$READCHECK" 2>/dev/null | sort -u > $TMP/verify.done
+	for f in "$GAMES"/*.pce "$GAMES"/*.sgx "$GAMES"/*/*.pce "$GAMES"/*/*.sgx; do
+		[ -f "$f" ] && echo "$f"
+	done | while read -r f; do grep -qxF "$(basename "$f")" $TMP/verify.done || echo "$f"; done > $todo
+	n=$(wc -l < $todo); i=0
+	[ "$n" -gt 0 ] || { rm -f $todo; return; }
+	[ "$n" -gt 2 ] && status_show "Checking new games..." "" 0 ""
+	while read -r f; do
+		i=$((i+1)); [ "$n" -gt 2 ] && status "Checking new games..." "$(basename "$f")" $((i * 100 / n)) ""
+		sz=$(stat -c %s "$f")
+		if [ $((sz % 1024)) = 512 ]; then tail -c +513 "$f" > $TMP/vf; else cp "$f" $TMP/vf; fi   # copier header
+		k=$(crc32_of $TMP/vf)
+		if crc_known "$k"; then st=ok
+		elif [ -n "$(db_title "$k" "$(header_of $TMP/vf)")" ]; then st=mismatch
+		else st=unknown; fi
+		readcheck_set "$f" $st $k
+	done < $todo
+	rm -f $todo $TMP/vf $TMP/verify.done; sync
+	log "library: checked $n new game file(s)"
+	[ "$n" -gt 2 ] && status_close
+}
 play_cart() {
 	status_show "Reading HuCard..." "" "-"          # the reader's own read: no progress visible
 	cart_ready 30 || { show_error "Could not read the HuCard" "Check the card and try again"; return; }
 	copy_dump "$CART_FILE" $TMP/raw.pce || { rm -f $TMP/raw.pce; show_error "Could not read the HuCard" "Check the card and try again"; return; }
 	cp "${CART_FILE%.pce}.crc" $LOGD/last-cart.crc 2>/dev/null   # reader's own .crc file, kept for study
 	status "Identifying game..." "" "-" ""
-	pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP/raw.pce $TMP/cart.pce || { show_error "Could not prepare the game"; return; }
-	crc=$(crc32_of $TMP/cart.pce); hdr=$(header_of $TMP/raw.pce)
-	title=$(db_title "$crc" "$hdr")
+	normalize || { show_error "Could not prepare the game"; return; }
+	identify
+	unstable=""
+	# Worn contacts can flip bits. Anything that isn't an exact database match
+	# is read again; if the two reads differ, a third read settles every byte
+	# by majority vote.
+	sgxc=""; case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) sgxc=1 ;; esac
+	if [ "$(debug_opt readtwice 0)" = 1 ] || { [ -z "$sc" ] && [ -z "$sgxc" ] && ! crc_known "$crc"; }; then
+		cp $TMP/raw.pce $TMP/raw1.pce
+		sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null   # read the cart again, not the cache
+		if copy_dump "$CART_FILE" $TMP/raw2.pce "Checking the read..."; then
+			if cmp -s $TMP/raw1.pce $TMP/raw2.pce; then
+				log "cart: second read identical"
+			else
+				log "cart: second read differs, reading a third time"
+				sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+				if copy_dump "$CART_FILE" $TMP/raw3.pce "Checking the read again..."; then
+					pce-normalize --vote $TMP/raw1.pce $TMP/raw2.pce $TMP/raw3.pce $TMP/raw.pce >> "$LOG" 2>&1
+					v=$?
+					if [ $v = 2 ]; then          # some bytes differed all three times: not a usable read
+						rm -f $TMP/raw*.pce $TMP/cart.pce
+						log "cart: no clean read (bytes differed in all three reads): not added"
+						show_error "Couldn't get a clean read of this HuCard" "Clean its contacts, insert it again and retry"
+						return
+					fi
+					[ $v = 0 ] || cp $TMP/raw1.pce $TMP/raw.pce
+					unstable=1; normalize; identify
+				fi
+			fi
+		fi
+		rm -f $TMP/raw1.pce $TMP/raw2.pce $TMP/raw3.pce
+	fi
 	if [ -n "$title" ]; then log "cart: identified as \"$title\" (crc32 $crc, header $hdr)"
 	else log "cart: not in the game database (crc32 $crc, header $hdr)"; fi
+	[ -n "$crc256" ] && log "cart: first 256 KB crc32 $crc256${crc512:+, first 512 KB crc32 $crc512}"
+	if [ -n "$sc" ]; then                          # a System Card: keep it as the CD BIOS
+		[ "$(syscard_file "$crc")" = "$sc" ] || { head -c 262144 $TMP/cart.pce > $TMP/cart.trim && mv $TMP/cart.trim $TMP/cart.pce; }
+		mkdir -p "$BIOS_DIR"
+		if cp $TMP/cart.pce "$BIOS_DIR/$sc.part" && mv "$BIOS_DIR/$sc.part" "$BIOS_DIR/$sc" && sync; then
+			log "cart: System Card saved as bios/$sc"
+			rm -f $TMP/raw.pce
+			status_show "System Card saved" "CD games can now be played (bios/$sc)" "" ""; sleep 3; status_close
+		else
+			rm -f "$BIOS_DIR/$sc.part"; show_error "Could not save the System Card" "Is the SD card full?"
+		fi
+		return
+	fi
 	status "Preparing game..." "${title:-Unknown HuCard ($crc)}" "-" ""
+	ext=pce
+	case " $SGX_CRCS " in *" $crc "*|*" $crc512 "*) ext=sgx ;; esac   # SuperGrafx HuCard
+	case "$title" in *"Super Grafx)"*|*"(SGX)"*) ext=sgx ;; esac      # ... or named so in the database
 	s=$(stat -c %s $TMP/cart.pce); game=""
-	for f in "$GAMES"/*.pce; do             # same game already in the library?
-		[ -f "$f" ] && [ "$(stat -c %s "$f")" = "$s" ] && cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
+	for f in "$GAMES"/*.pce "$GAMES"/*.sgx "$GAMES"/*/*.pce "$GAMES"/*/*.sgx; do   # same game already in the library?
+		[ -f "$f" ] || continue
+		fs=$(stat -c %s "$f")
+		if [ "$fs" = "$s" ]; then cmp -s "$f" $TMP/cart.pce && { game=$f; break; }
+		elif [ "$fs" = $((s + 512)) ]; then tail -c +513 "$f" | cmp -s - $TMP/cart.pce && { game=$f; break; }   # copier header
+		fi
 	done
+	# how good is this read?
+	rstate=ok
+	if ! crc_known "$crc"; then [ -n "$title" ] && rstate=mismatch || rstate=unknown; fi
+	[ -n "$unstable" ] && log "cart: the reads differed; the majority vote settled every byte"
+	# a copy of this game marked as a bad read is replaced by a good read
+	if [ -z "$game" ] && [ -n "$title" ] && [ $rstate = ok ]; then
+		for f in "$GAMES"/"$(safe_name "$title")".pce "$GAMES"/"$(safe_name "$title")".sgx \
+		         "$GAMES"/*/"$(safe_name "$title")".pce "$GAMES"/*/"$(safe_name "$title")".sgx; do
+			[ -f "$f" ] || continue
+			case "$(readcheck_of "$f")" in unstable|mismatch)
+				cp $TMP/cart.pce "$f.part" && mv "$f.part" "$f" && sync && {
+					readcheck_set "$f" ok $crc; game=$f; log "cart: good read replaces the bad copy $(basename "$f")"; } ;;
+			esac
+		done
+	fi
+	new=""
 	if [ -z "$game" ]; then
 		if [ -n "$title" ]; then
-			game="$GAMES/$(safe_name "$title").pce"
-			[ -e "$game" ] && game="$GAMES/$(safe_name "$title") [$crc].pce"
+			game="$(game_folder $ext)/$(safe_name "$title").$ext"
+			[ -e "$game" ] && game="$(game_folder $ext)/$(safe_name "$title") [$crc].$ext"
 		else
-			game=$GAMES/cart-$crc.pce        # the picker offers to name it (Rename)
+			game=$(game_folder $ext)/cart-$crc.$ext       # the picker offers to name it (Rename)
 		fi
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
-		log "cart: new dump saved as $(basename "$game")"
+		log "cart: new dump saved as $(basename "$game") ($rstate)"; new=1
+		readcheck_set "$game" $rstate $crc
 	fi
 	rm -f $TMP/raw.pce
 	# show the database title unless the user already named this file
 	if [ -n "$title" ] && ! awk -F '\t' -v f="$(basename "$game")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
 		set_title "$game" "$title"
 	fi
+	if [ $rstate = mismatch ] && [ -n "$new" ]; then
+		status_show "This doesn't match the known copy of $title" "It may be a hack, a revision or a bad read. Cleaning the contacts and inserting it again checks it" "" ""
+		sleep 4
+	fi
+	if [ -z "$title" ] && [ -n "$new" ] && [ "$ext" = pce ]; then
+		# unknown: let the player choose PC Engine, SuperGrafx or System Card
+		status_close; ASK_GAME=$game; return
+	fi
 	touch $TMP/cart_game; run_game "$game"; rm -f $TMP/cart_game
+}
+
+# "Play the CD in the drive": copy a disc from a USB CD drive into games/
+# (cd-rip: progress on the status screen), then play it. A disc copied before
+# is recognised by its table of contents and played straight away.
+CD_DEV=/dev/sr0
+# CD names by disc id (from the table of contents): cddb-local.csv (named on
+# the console with Rename, newest line wins) before the built-in cddb.csv
+CD_DB=/usr/share/archgx/cddb.csv
+LOCAL_CDDB=$ROM/cddb-local.csv
+cd_title() {
+	cat "$CD_DB" "$LOCAL_CDDB" 2>/dev/null | tr -d '\r' | awk -F, -v id="$1" '
+		{ k = tolower($1); sub(/^"/, "", k); sub(/^0x/, "", k) }
+		k == id { t = $0; sub(/^[^,]*,/, "", t)
+			if (t ~ /^"/) { t = substr(t, 2); sub(/",.*$/, "", t); gsub(/""/, "\"", t) } else sub(/,.*$/, "", t)
+			if (t != "") last = t }
+		END { print last }'
+}
+rip_cd() {
+	status_show "Reading the CD..." "" "-"
+	rm -f $TMP/status.abort
+	# copied before (maybe renamed or moved since)? play that copy
+	id=$(/usr/bin/cd-rip --id $CD_DEV 2>/dev/null | cut -d' ' -f1)
+	old=""; [ -n "$id" ] && old=$(find "$GAMES" -name "cd-$id.cue" 2>/dev/null | head -1)
+	if [ -n "$old" ]; then
+		log "cd: disc $id is already in the library: $old"
+		status_close; run_game "$old"; return
+	fi
+	mkdir -p "$F_CD"
+	out=$(/usr/bin/cd-rip $CD_DEV "$F_CD" $TMP/status 2>> "$LOG"); rc=$?
+	case $rc in
+	0|4)	cue=$(echo "$out" | tail -1)
+		id=$(basename "$cue" .cue); id=${id#cd-}
+		if ! awk -F '\t' -v f="$(basename "$cue")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
+			t=$(cd_title "$id")
+			set_title "$cue" "${t:-Unknown CD ($id)}"     # unknown: Rename gives it a name
+			if [ -n "$t" ]; then log "cd: disc $id is \"$t\""; else log "cd: disc $id is not in the CD database"; fi
+		fi
+		log "cd: $cue (cd-rip exit $rc)"
+		if [ $rc = 4 ]; then
+			status_show "CD copied, but some sectors could not be read" "Clean the disc and copy it again if the game misbehaves" "" error; sleep 4
+		fi
+		status_close
+		run_game "$cue" ;;
+	2)	show_error "No disc in the drive" "Insert a PC Engine CD and try again" ;;
+	3)	sleep 3; status_close ;;                     # cd-rip showed "Not enough space"
+	5)	log "cd: copy cancelled"; sleep 2; status_close ;;
+	*)	show_error "Could not copy the CD" "See logs/gx-start.log" ;;
+	esac
+}
+
+# USB stick (FAT32) in a front port: "__USB__:import:sdb1" or "__USB__:export:sdb1".
+#  import: games/, saves/, bios/ and patches/ from the stick's ArchGX folder
+#          (or its top level) are copied in; files already on the card are
+#          skipped; loose games are then sorted into the library's folders.
+#  export: games/ and saves/ go to ArchGX/ on the stick (changed files are
+#          copied again), ready to import on another console.
+USB_MNT=$TMP/usb
+usb_copy_list() {        # $1 = source dir, $2 = dest dir, $3 = 1: replace files of another size
+	[ -d "$1" ] || return 0
+	( cd "$1" && find . -type f ! -path "*/.*" ! -path "*System Volume Information*" ) | while read -r f; do
+		f=${f#./}; d="$2/$f"
+		if [ "$2" = "$GAMES" ]; then                  # already in one of the library's folders?
+			bn=$(basename "$f"); hit=""
+			for sd in "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"; do [ -e "$sd/$bn" ] && hit=1; done
+			[ -n "$hit" ] && continue
+		fi
+		if [ -e "$d" ]; then
+			[ "$3" = 1 ] && [ "$(stat -c %s "$1/$f")" != "$(stat -c %s "$d")" ] || continue
+		fi
+		echo "$1/$f	$d"
+	done
+}
+usb_job() {
+	mode=$1; dev=$2
+	status_show "Opening the USB stick..." "" "-"
+	mkdir -p $USB_MNT; umount $USB_MNT 2>/dev/null
+	if ! mount -t vfat -o rw,noatime,shortname=mixed /dev/$dev $USB_MNT 2>> "$LOG"; then
+		log "usb: cannot mount /dev/$dev"
+		show_error "Can't read this USB stick" "Use a stick formatted as FAT32"; return
+	fi
+	list=$TMP/usb.list; : > $list
+	if [ $mode = import ]; then
+		src=$USB_MNT; [ -d "$USB_MNT/ArchGX" ] && src=$USB_MNT/ArchGX
+		usb_copy_list "$src/games" "$GAMES" >> $list
+		usb_copy_list "$src/saves" "$SAVES" >> $list
+		usb_copy_list "$src/bios" "$BIOS_DIR" >> $list
+		usb_copy_list "$src/patches" "$ROM/patches" >> $list
+		dest=/userdata/rom; verb="Importing"
+	else
+		usb_copy_list "$GAMES" "$USB_MNT/ArchGX/games" 1 >> $list
+		usb_copy_list "$SAVES" "$USB_MNT/ArchGX/saves" 1 >> $list
+		dest=$USB_MNT; verb="Exporting"
+	fi
+	n=$(wc -l < $list); total=0
+	while IFS='	' read -r a b; do total=$((total + $(stat -c %s "$a") / 1024 + 1)); done < $list
+	free=$(df -Pk "$dest" | awk 'NR == 2 { print $4 }')
+	log "usb: $mode from/to $dev: $n files, $total KB (free $free KB)"
+	if [ "$n" = 0 ]; then
+		status_show "Nothing new to copy" "The files are already there" "" ""; sleep 3
+	elif [ "$total" -gt "${free:-0}" ]; then
+		show_error "Not enough space" "$((total / 1024)) MB needed, $((free / 1024)) MB free"
+	else
+		done_kb=0; i=0; bad=0
+		while IFS='	' read -r a b; do
+			i=$((i+1))
+			status "$verb $i of $n files..." "$(basename "$a")" $((done_kb * 100 / total)) ""
+			mkdir -p "$(dirname "$b")"
+			cp "$a" "$b.part" && mv "$b.part" "$b" || { rm -f "$b.part"; bad=$((bad+1)); log "usb: could not copy $a"; }
+			done_kb=$((done_kb + $(stat -c %s "$a") / 1024 + 1))
+		done < $list
+		sync
+		[ $mode = import ] && sort_root
+		log "usb: $mode done, $((n - bad)) of $n files copied"
+		if [ $bad -gt 0 ]; then show_error "$bad file(s) could not be copied" "See logs/gx-start.log"
+		else status_show "$verb done: $n file(s)" "$([ $mode = export ] && echo "In the ArchGX folder on the stick. You can remove it now")" "" ""; sleep 3; fi
+	fi
+	sync; umount $USB_MNT 2>/dev/null; rm -f $list
+	status_close
 }
 
 # ---------------------------------------------------------------- main
 mkdir -p $TMP
 [ -x /etc/fix_storage.sh ] && /etc/fix_storage.sh      # our storage-partition fix
-mkdir -p "$GAMES" "$LOGD" "$SAVES"
+# A card formatted on a computer has no name: call it RETRONGX, like the
+# console's own format (a name you chose is kept). Done before anything
+# opens a file on the card, with the partition briefly unmounted.
+GB=/dev/block/by-name/gb_rom
+label_msg=""
+if [ -z "$(fat-label $GB 2>/dev/null)" ] && fat-label $GB > /dev/null 2>&1; then
+	sync
+	if umount /userdata/rom 2>/dev/null; then
+		label_msg=$(fat-label --if-empty $GB RETRONGX 2>&1)
+		mount -t vfat -o rw,noatime,nodiratime,norelatime,shortname=mixed,errors=remount-ro $GB /userdata/rom ||
+			{ sleep 1; mount -t vfat -o rw,noatime,nodiratime,norelatime,shortname=mixed,errors=remount-ro $GB /userdata/rom; }
+	fi
+fi
+mkdir -p "$GAMES" "$LOGD" "$SAVES" "$BIOS_DIR" "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"
 [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 262144 ] && mv "$LOG" "$LOG.old"
-log "==== ArchGX GP1 ($(date))"
+log "==== $(cat /etc/archgx-release 2>/dev/null || echo ArchGX) ($(date))"
+[ -n "$label_msg" ] && log "$label_msg"
 
 # Recovery: "reset-retroarch-settings" on the card restores the stock RetroArch settings
 if [ -f "$ROM/reset-retroarch-settings" ]; then
@@ -427,6 +843,31 @@ fi
 
 cart_watch &
 
+# USB event log (read-only, for hardware work): every device that appears or
+# disappears, with its ID and name, goes to logs/usb.log
+usb_list() {
+	for d in $SYS/bus/usb/devices/*; do
+		[ -f "$d/idVendor" ] || continue
+		echo "${d##*/} $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/speed" 2>/dev/null)M $(cat "$d/manufacturer" 2>/dev/null) $(cat "$d/product" 2>/dev/null)"
+	done | sort
+}
+usb_watch() {
+	u=$LOGD/usb.log; [ -f "$u" ] && [ "$(stat -c %s "$u")" -gt 131072 ] && mv "$u" "$u.old"
+	prev=$TMP/usb.prev; usb_list > $prev
+	{ echo "$(cut -d' ' -f1 /proc/uptime)s ---- boot, devices present:"; sed 's/^/   /' $prev; } >> "$u"; sync
+	while :; do
+		sleep 0.5
+		[ -f $TMP/usb_pause ] && continue
+		usb_list > $TMP/usb.now
+		if ! cmp -s $prev $TMP/usb.now; then
+			t=$(cut -d' ' -f1 /proc/uptime)
+			{ grep -vxF -f $prev $TMP/usb.now | sed "s/^/${t}s + /"; grep -vxF -f $TMP/usb.now $prev | sed "s/^/${t}s - /"; } >> "$u"; sync
+			mv $TMP/usb.now $prev
+		fi
+	done
+}
+usb_watch &
+
 # cart in at power-on: play it straight away (reader ~2-5 s, dump file up to ~15 s)
 t=0
 while [ ! -f "$CART_FILE" ] && { [ $t -lt 8 ] || { [ $t -lt 20 ] && [ -n "$(reader_part)" ]; }; }; do
@@ -440,13 +881,18 @@ done
 fails=0
 while :; do
 	if [ -f "$CART_FILE" ]; then export PCE_LAUNCHER_CART=1; else unset PCE_LAUNCHER_CART; fi
+	if [ -n "$ASK_GAME" ]; then export PCE_LAUNCHER_ASK="$ASK_GAME"; ASK_GAME=""; else unset PCE_LAUNCHER_ASK; fi
 	rm -f $TMP/choice
+	sort_root
+	verify_library
 	/usr/bin/pce-launcher "$GAMES" $TMP/choice >> $LOGD/launcher.log 2>&1
 	rc=$?; sync; choice=$(head -1 $TMP/choice 2>/dev/null); how=$(sed -n 2p $TMP/choice 2>/dev/null)
 	case "$rc:$choice" in
 	0:__CART__|2:*)   play_cart; fails=0 ;;
 	0:__RESTART__)    log "restart requested"; sync; reboot; exit 0 ;;
 	0:__RETROARCH__)  run_retroarch_menu; fails=0 ;;
+	0:__RIPCD__)      rip_cd; fails=0 ;;
+	0:__USB__:*)      m=${choice#__USB__:}; usb_job "${m%%:*}" "${m#*:}"; fails=0 ;;
 	0:?*)             run_game "$choice" "$how"; fails=0 ;;
 	*)              fails=$((fails+1)); log "picker exited ($rc)"; ensure_display
 	                [ $fails -ge 5 ] && { log "picker keeps failing, waiting 10 s"; sleep 10; fails=0; } ;;

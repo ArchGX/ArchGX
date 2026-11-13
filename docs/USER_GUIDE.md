@@ -18,11 +18,11 @@ A USB keyboard works too: arrows, Enter, Escape (back), Tab (SELECT).
 
 ## The Game Library
 
-The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z.
+The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z. SuperGrafx games are marked **SGX** and CD games **CD**.
 
 **Starting a game**
 - If a game has a save, you're asked: **Resume last save**, **Start new game** or **Cancel**. Resume continues from your newest save slot.
-- **SELECT** on a game opens **Rename** and **Delete**.
+- **SELECT** on a game opens its options: **Rename**, **Delete**, and for HuCards **Mark as SuperGrafx** (or back) and **Use as CD System Card**. Use these when a dump wasn't recognised automatically.
 - Rename changes only the name shown. The file and its saves stay matched, and naming an unknown HuCard also records it for the game database (see [GAMEDB.md](GAMEDB.md)).
 
 **Entries at the bottom of the list**
@@ -43,9 +43,30 @@ Insert a HuCard and ArchGX takes over:
 - A cart that's already in the library isn't stored twice.
 - Pulling the cart during a game saves its battery memory and returns to the library.
 - **Unknown carts** (homebrew, repros, prototypes) show as "Unknown HuCard (checksum)". Rename them to give them a name.
-- **Bad reads:** dirty contacts can produce a wrong read, which shows up as an unknown cart. Delete it, clean the cart and reinsert it.
+- **Colours in the library:** green = matches the game database, amber ("Modified?") = a known game with a different checksum (a hack, a revision or a bad read: clean the cart and insert it again to check), grey = not in the database.
+- **Bad reads:** a cart that reads differently every time isn't added. Clean its contacts and insert it again.
+- **Debug screen:** hold SELECT for 3 seconds on About.
+- **Tabs:** Left/Right switches between Recent, PC Engine, TurboGrafx-16, SuperGrafx and CD Games. Each is a folder in `games/`; games copied loose into `games/` are sorted at start-up.
+- **Rename** also renames the file (and its saves) on the SD card.
+- **USB stick (FAT32):** when one is plugged into a front port, "USB stick" appears at the top of the library: import games, saves and BIOS files from it, or export your games and saves to an `ArchGX` folder on it.
 
 ArchGX mounts the reader read-only and never sends it commands.
+
+**SuperGrafx HuCards** (Daimakaimura, Aldynes, Battle Ace, Madou King Granzort, 1941 Counter Attack, Darius Plus) are stored as `<Title>.sgx` and run on the Beetle SuperGrafx core. Copied `.sgx` files work the same way.
+
+**System Cards** are not played: inserting one saves it to `bios/` so CD games can use it (message "System Card saved"). If a card isn't recognised, it shows up as an unknown HuCard: choose **Use as CD System Card** in its options. Its first 256 KB are saved to `bios/` and it leaves the library.
+
+## CD games (beta)
+
+Copy CD games into `games/`, either loose or one folder per game (one folder level is scanned):
+- `.cue` with its `.bin` tracks, `.chd`, or `.ccd` with `.img`/`.sub`;
+- multi-disc games: an `.m3u` playlist listing the discs. Only the playlist is shown.
+
+CD games need a **System Card** image in the card's `bios/` folder. Either insert your System Card (it is saved automatically) or copy a dump named `syscard3.pce` (Super CD-ROM² 3.0), `syscard3u.pce` (TurboGrafx Super System Card), `syscard2.pce`, `syscard2u.pce` or `syscard1.pce`. The best one present is used, in that order. ArchGX doesn't include any BIOS files.
+
+**Copying your own discs:** plug a USB CD drive into a front USB port (use a drive with its own power supply) and insert a disc. **Play the CD in the drive** appears in the library. The first time, the disc is copied to `games/cd-<id>/` with a progress bar (a few minutes), then it starts. After that the same disc plays from the SD card straight away. A copied disc shows as "Unknown CD (id)": use **Rename** to name it. If some sectors can't be read, you're told: clean the disc, delete the copy and copy it again.
+
+Deleting a CD game removes its tracks too, and its folder once empty. Saves, save states and rewind work as for HuCards.
 
 ## The in-game menu
 
@@ -82,7 +103,8 @@ The large partition of the SD card (shown as `RETRONGX` on a PC) holds everythin
 
 | Path | Contents |
 |---|---|
-| `games/` | Your games (`.pce`). Copy your own dumps here from a PC |
+| `games/` | Your games (`.pce`, `.sgx`, `.cue`, `.chd`, `.ccd`, `.m3u`; CD games may sit in one folder each). Copy your own dumps here from a PC |
+| `bios/` | CD System Card images (`syscard3.pce` …) |
 | `saves/` | Battery saves (`.srm`) and save states (`.state1`–`.state4` with `.png` pictures) |
 | `screenshots/` | Screenshots from the in-game menu |
 | `titles.txt` | Names shown in the library (file name, a tab, then the name) |
