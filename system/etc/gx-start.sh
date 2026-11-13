@@ -275,6 +275,40 @@ sort_root() {
 
 safe_name() { echo "$1" | sed 's#[\\/:*?"<>|]#-#g; s/[. ]*$//'; }
 
+# Games still named by code (cart-<crc32>.pce, a CD's cd-<id> folder) get the
+# name shown in the library, once, so the SD card reads like the library.
+# Saves, recent list and read check follow; "Unknown ..." titles are left alone.
+tidy_names() {
+	[ -f "$TITLES" ] || return 0
+	tn=0
+	awk -F '\t' '{ t[$1] = $2 } END { for (f in t) print f "\t" t[f] }' "$TITLES" | while IFS='	' read -r f t; do
+		case "$t" in ""|Unknown*) continue ;; esac
+		case "$f" in cart-????????.pce|cart-????????.sgx|cd-*.cue) ;; *) continue ;; esac
+		path=$(find "$GAMES" -name "$f" 2>/dev/null | head -1)
+		[ -n "$path" ] || continue
+		dir=${path%/*}; nn=$(safe_name "$t"); [ -n "$nn" ] || continue
+		case "$f" in
+		cd-*.cue)
+			id=${f%.cue}
+			[ "$(basename "$dir")" = "$id" ] || continue        # the folder already has a name
+			[ -e "${dir%/*}/$nn" ] && continue
+			mv "$dir" "${dir%/*}/$nn" && log "tidy: folder $id -> $nn" ;;
+		*)
+			ext=${f##*.}; ob=${f%.*}
+			[ -e "$dir/$nn.$ext" ] && continue
+			mv "$path" "$dir/$nn.$ext" || continue
+			for sv in "$SAVES/$ob".*; do [ -f "$sv" ] && mv "$sv" "$SAVES/$nn${sv#$SAVES/$ob}"; done
+			set_title "$dir/$nn.$ext" "$t"
+			if [ -f "$RECENT" ]; then
+				awk -v o="$f" -v n="$nn.$ext" '{ print ($0 == o ? n : $0) }' "$RECENT" > "$RECENT.new" && mv "$RECENT.new" "$RECENT"
+			fi
+			awk -F '\t' -v o="$f" -v n="$nn.$ext" '$1 == o { $1 = n; l = $0 } END { if (l != "") print l }' OFS='\t' "$READCHECK" >> "$READCHECK" 2>/dev/null
+			log "tidy: $f -> $nn.$ext" ;;
+		esac
+	done
+	sync
+}
+
 # ------------------------------------------------------- progress screen
 # pce-launcher --status shows $TMP/status: message, subtitle, progress
 # ("0".."100" measured, "-" activity only) and state ("error" / "done").
@@ -513,7 +547,8 @@ identify() {
 normalize() {
 	pce-normalize $TMP/raw.pce $TMP/cart.pce > $TMP/norm.out 2>&1 || cp $TMP/raw.pce $TMP/cart.pce
 	cat $TMP/norm.out >> "$LOG"
-	tg16=""; grep -q "TG16 bit-swapped" $TMP/norm.out && tg16=1
+	tg16=""; if grep -q "TG16 bit-swapped" $TMP/norm.out; then tg16=1; fi
+	return 0
 }
 
 ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
@@ -718,42 +753,116 @@ rip_cd() {
 #  export: games/ and saves/ go to ArchGX/ on the stick (changed files are
 #          copied again), ready to import on another console.
 USB_MNT=$TMP/usb
+# run a command for at most $1 seconds (a dead USB drive must not freeze the console)
+with_timeout() {
+	wt=$1; shift
+	"$@" & wp=$!; wn=0
+	while kill -0 $wp 2>/dev/null; do
+		[ $wn -ge $((wt * 10)) ] && { kill -9 $wp 2>/dev/null; log "timeout after ${wt}s: $*"; return 124; }
+		sleep 0.1; wn=$((wn + 1))
+	done
+	wait $wp
+}
+usb_unmount() { sync; with_timeout 30 umount $USB_MNT 2>/dev/null || umount -l $USB_MNT 2>/dev/null; }
+# a game file already in one of the library's folders (imports skip it)
+in_library() {
+	for sd in "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"; do
+		[ -e "$sd/$1" ] && return 0
+		for u in "$sd"/*/; do [ -e "$u$1" ] && return 0; done
+	done
+	return 1
+}
 usb_copy_list() {        # $1 = source dir, $2 = dest dir, $3 = 1: replace files of another size
 	[ -d "$1" ] || return 0
 	( cd "$1" && find . -type f ! -path "*/.*" ! -path "*System Volume Information*" ) | while read -r f; do
 		f=${f#./}; d="$2/$f"
-		if [ "$2" = "$GAMES" ]; then                  # already in one of the library's folders?
-			bn=$(basename "$f"); hit=""
-			for sd in "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"; do [ -e "$sd/$bn" ] && hit=1; done
-			[ -n "$hit" ] && continue
-		fi
+		[ "$2" = "$GAMES" ] && in_library "$(basename "$f")" && continue
 		if [ -e "$d" ]; then
 			[ "$3" = 1 ] && [ "$(stat -c %s "$1/$f")" != "$(stat -c %s "$d")" ] || continue
 		fi
 		echo "$1/$f	$d"
 	done
 }
+usb_copy_one() {         # $1 = source file, $2 = dest, $3 = 1: replace a file of another size
+	if [ -e "$2" ]; then
+		[ "$3" = 1 ] && [ "$(stat -c %s "$1")" != "$(stat -c %s "$2")" ] || return 0
+	fi
+	echo "$1	$2"
+}
+# Copy one file with II to cancel and a watchdog: no progress for 30 s means
+# the drive hangs. 0 ok, 1 error, 2 cancelled, 3 stalled.
+copy_watched() {
+	rm -f "$2.part"
+	cp "$1" "$2.part" 2>> "$LOG" & cpid=$!
+	ci=0; last=-1; still=0
+	while kill -0 $cpid 2>/dev/null; do
+		if [ $ci -lt 20 ]; then sleep 0.05; else sleep 0.5; fi       # small files finish in the first second
+		ci=$((ci + 1))
+		[ -f $TMP/status.abort ] && { kill -9 $cpid 2>/dev/null; rm -f "$2.part"; return 2; }
+		[ $ci -lt 20 ] && continue
+		sz=$(stat -c %s "$2.part" 2>/dev/null || echo 0)
+		if [ "$sz" = "$last" ]; then still=$((still + 1)); else still=0; last=$sz; fi
+		[ $still -ge 60 ] && { kill -9 $cpid 2>/dev/null; rm -f "$2.part" 2>/dev/null; return 3; }
+	done
+	wait $cpid || { rm -f "$2.part"; return 1; }
+	mv "$2.part" "$2" || return 1
+}
+# USB stick (FAT32): "__USB__:import:sdb1" or "__USB__:export:sdb1". The picker
+# (pce-launcher --pick) lists what to copy; "__ALL__" means everything.
+#  import: games/ (keeping its folders), saves/, bios/ and patches/ from the
+#          stick's ArchGX folder (or its top level); anything else picked goes
+#          to games/ and is sorted. Files the card already has are skipped.
+#  export: the picked games (and their saves) to ArchGX/ on the stick.
 usb_job() {
 	mode=$1; dev=$2
 	status_show "Opening the USB stick..." "" "-"
 	mkdir -p $USB_MNT; umount $USB_MNT 2>/dev/null
-	if ! mount -t vfat -o rw,noatime,shortname=mixed /dev/$dev $USB_MNT 2>> "$LOG"; then
+	if ! with_timeout 30 mount -t vfat -o rw,noatime,shortname=mixed /dev/$dev $USB_MNT 2>> "$LOG"; then
 		log "usb: cannot mount /dev/$dev"
 		show_error "Can't read this USB stick" "Use a stick formatted as FAT32"; return
 	fi
+	status_close
+	sel=$TMP/usb.sel; rm -f $sel
+	if [ $mode = import ]; then /usr/bin/pce-launcher --pick import $USB_MNT $sel >> $LOGD/launcher.log 2>&1
+	else /usr/bin/pce-launcher --pick export "$GAMES" $sel >> $LOGD/launcher.log 2>&1; fi
+	if [ ! -s $sel ]; then log "usb: $mode: nothing chosen"; usb_unmount; return; fi
 	list=$TMP/usb.list; : > $list
-	if [ $mode = import ]; then
-		src=$USB_MNT; [ -d "$USB_MNT/ArchGX" ] && src=$USB_MNT/ArchGX
-		usb_copy_list "$src/games" "$GAMES" >> $list
-		usb_copy_list "$src/saves" "$SAVES" >> $list
-		usb_copy_list "$src/bios" "$BIOS_DIR" >> $list
-		usb_copy_list "$src/patches" "$ROM/patches" >> $list
-		dest=/userdata/rom; verb="Importing"
-	else
-		usb_copy_list "$GAMES" "$USB_MNT/ArchGX/games" 1 >> $list
-		usb_copy_list "$SAVES" "$USB_MNT/ArchGX/saves" 1 >> $list
-		dest=$USB_MNT; verb="Exporting"
-	fi
+	base=$USB_MNT; [ -d "$USB_MNT/ArchGX" ] && base=$USB_MNT/ArchGX
+	while read -r p; do
+		if [ $mode = import ]; then
+			if [ "$p" = __ALL__ ]; then
+				usb_copy_list "$base/games" "$GAMES"; usb_copy_list "$base/saves" "$SAVES"
+				usb_copy_list "$base/bios" "$BIOS_DIR"; usb_copy_list "$base/patches" "$ROM/patches"
+				continue
+			fi
+			rel=${p#$USB_MNT/}; rel=${rel#ArchGX/}
+			case "$rel" in
+			games)     d=$GAMES ;;      games/*)   d=$GAMES/${rel#games/} ;;
+			saves)     d=$SAVES ;;      saves/*)   d=$SAVES/${rel#saves/} ;;
+			bios)      d=$BIOS_DIR ;;   bios/*)    d=$BIOS_DIR/${rel#bios/} ;;
+			patches)   d=$ROM/patches ;; patches/*) d=$ROM/patches/${rel#patches/} ;;
+			*)         d=$GAMES/$(basename "$p") ;;      # loose: sorted after the copy
+			esac
+			if [ -d "$p" ]; then usb_copy_list "$p" "$d"
+			elif ! in_library "$(basename "$p")"; then usb_copy_one "$p" "$d"; fi
+		else
+			out=$USB_MNT/ArchGX
+			if [ "$p" = __ALL__ ]; then
+				usb_copy_list "$GAMES" "$out/games" 1; usb_copy_list "$SAVES" "$out/saves" 1; continue
+			fi
+			d=$out/games/${p#$GAMES/}
+			if [ -d "$p" ]; then usb_copy_list "$p" "$d" 1
+				bases=$(find "$p" -name "*.cue" -o -name "*.chd" -o -name "*.ccd" -o -name "*.m3u" -o -name "*.pce" -o -name "*.sgx" 2>/dev/null)
+			else usb_copy_one "$p" "$d" 1; bases=$p; fi
+			echo "$bases" | while read -r g; do               # the game's saves go too
+				[ -n "$g" ] || continue
+				b=$(basename "$g"); b=${b%.*}
+				for sv in "$SAVES/$b".*; do [ -f "$sv" ] && usb_copy_one "$sv" "$out/saves/$(basename "$sv")" 1; done
+			done
+		fi
+	done < $sel >> $list
+	sort -u $list -o $list
+	if [ $mode = import ]; then dest=/userdata/rom; verb="Importing"; else dest=$USB_MNT; verb="Exporting"; fi
 	n=$(wc -l < $list); total=0
 	while IFS='	' read -r a b; do total=$((total + $(stat -c %s "$a") / 1024 + 1)); done < $list
 	free=$(df -Pk "$dest" | awk 'NR == 2 { print $4 }')
@@ -763,21 +872,33 @@ usb_job() {
 	elif [ "$total" -gt "${free:-0}" ]; then
 		show_error "Not enough space" "$((total / 1024)) MB needed, $((free / 1024)) MB free"
 	else
-		done_kb=0; i=0; bad=0
+		rm -f $TMP/status.abort
+		done_kb=0; i=0; ok=0; why=""
+		status_show "$verb..." "" 0 cancel
 		while IFS='	' read -r a b; do
-			i=$((i+1))
-			status "$verb $i of $n files..." "$(basename "$a")" $((done_kb * 100 / total)) ""
+			i=$((i + 1))
+			status "$verb $i of $n files..." "$(basename "$a")" $((done_kb * 100 / total)) cancel
 			mkdir -p "$(dirname "$b")"
-			cp "$a" "$b.part" && mv "$b.part" "$b" || { rm -f "$b.part"; bad=$((bad+1)); log "usb: could not copy $a"; }
-			done_kb=$((done_kb + $(stat -c %s "$a") / 1024 + 1))
+			copy_watched "$a" "$b" < /dev/null; r=$?
+			case $r in
+			0) ok=$((ok + 1)) ;;
+			2) why=cancelled; break ;;
+			3) why=stalled; log "usb: no progress for 30 s on $a"; break ;;
+			*) why=error; log "usb: could not copy $a"; break ;;      # stick pulled out or full
+			esac
+			done_kb=$((done_kb + $(stat -c %s "$a" 2>/dev/null || echo 0) / 1024 + 1))
 		done < $list
-		sync
-		[ $mode = import ] && sort_root
-		log "usb: $mode done, $((n - bad)) of $n files copied"
-		if [ $bad -gt 0 ]; then show_error "$bad file(s) could not be copied" "See logs/gx-start.log"
-		else status_show "$verb done: $n file(s)" "$([ $mode = export ] && echo "In the ArchGX folder on the stick. You can remove it now")" "" ""; sleep 3; fi
+		rm -f $TMP/status.abort; sync
+		[ $mode = import ] && [ $ok -gt 0 ] && sort_root
+		log "usb: $mode ${why:-done}: $ok of $n files copied"
+		case $why in
+		cancelled) status_show "Copy cancelled" "$ok of $n files were copied" "" ""; sleep 3 ;;
+		stalled)   show_error "The USB drive stopped responding: copy cancelled" "$ok of $n files were copied" ;;
+		error)     show_error "Copy stopped: USB stick removed or full?" "$ok of $n files were copied" ;;
+		*)         status_show "$verb done: $ok file(s)" "$([ $mode = export ] && echo "In the ArchGX folder on the stick. You can remove it now")" "" ""; sleep 3 ;;
+		esac
 	fi
-	sync; umount $USB_MNT 2>/dev/null; rm -f $list
+	usb_unmount; rm -f $list $sel
 	status_close
 }
 
@@ -868,6 +989,7 @@ usb_watch() {
 }
 usb_watch &
 
+sort_root; tidy_names
 # cart in at power-on: play it straight away (reader ~2-5 s, dump file up to ~15 s)
 t=0
 while [ ! -f "$CART_FILE" ] && { [ $t -lt 8 ] || { [ $t -lt 20 ] && [ -n "$(reader_part)" ]; }; }; do

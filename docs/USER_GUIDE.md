@@ -48,7 +48,8 @@ Insert a HuCard and ArchGX takes over:
 - **Debug screen:** hold SELECT for 3 seconds on About.
 - **Tabs:** Left/Right switches between Recent, PC Engine, TurboGrafx-16, SuperGrafx and CD Games. Each is a folder in `games/`; games copied loose into `games/` are sorted at start-up.
 - **Rename** also renames the file (and its saves) on the SD card.
-- **USB stick (FAT32):** when one is plugged into a front port, "USB stick" appears at the top of the library: import games, saves and BIOS files from it, or export your games and saves to an `ArchGX` folder on it.
+- **Folders:** SELECT on a game → Move to… a folder of its tab, the other HuCard tab, or a new folder. I opens a folder, II goes back.
+- **USB stick (FAT32):** when one is plugged into a front port, "USB stick" appears at the top of the library: tick what to import from it, or what to export to an `ArchGX` folder on it (I ticks, RUN copies, II cancels a copy).
 
 ArchGX mounts the reader read-only and never sends it commands.
 

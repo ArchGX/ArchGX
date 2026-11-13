@@ -1,5 +1,16 @@
 # Changelog
 
+## GP2-beta11: folders of your own, Move to…, USB pickers, safer copies
+
+- **Fix:** beta10 refused every HuCard that isn't a US card ("Could not prepare the game").
+- **Your own folders inside a tab:** shown at the top of the tab ("Folder"); I opens one, II goes back. SELECT on a folder renames it or deletes it when empty. The Recent tab has no folders.
+- **Move to…** (SELECT on a game): a folder of the tab, the tab itself, the other HuCard tab (PC Engine ↔ TurboGrafx-16, to fix a game filed in the wrong one) or a **New folder…** named with the keyboard. CDs move with their whole folder.
+- **USB import picker:** browse the stick; I ticks a game or a CD's folder (or opens any other folder), SELECT ticks a whole folder, RUN copies. "Everything" is the first entry. Games land in the right tab.
+- **USB export picker:** the same over your library (tabs and folders kept on the stick); each exported game's saves go with it.
+- **Cancel with II** during import/export: the file in progress is removed, finished files stay.
+- **Watchdog:** a copy that makes no progress for 30 seconds is stopped ("The USB drive stopped responding"); mounting and unmounting a stick also give up after 30 seconds. A pulled or full stick stops the copy at the first error.
+- **Readable names on the card:** at start-up, games still named by code (`cart-e7f8375c.pce`, a CD's `cd-c19b138e` folder) take their library name; saves, recent list and colours follow.
+
 ## GP2-beta10: library tabs, Rename renames the file, USB import/export, card name
 
 - **Tabs** (Left/Right): **Recent** (the 5 last played: a quick pick), **PC Engine**, **TurboGrafx-16**, **SuperGrafx**, **CD Games**, each with its game count. Each system tab is a folder in `games/`. New dumps go to the right one: SuperGrafx carts to SuperGrafx, bit-swapped (US) carts to TurboGrafx-16, other HuCards to PC Engine, copied CDs to CD Games. Games left loose in `games/` (copied from a computer or a USB stick) are moved into the folders at start-up; other folders stay where they are.

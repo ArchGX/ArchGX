@@ -19,7 +19,7 @@ Still to do before GP2 is released:
 
 | Item | Why |
 |---|---|
-| **Hardware test of beta10** | Tabs, Rename on the card, USB import/export, card name |
+| **Hardware test of beta11** | Folders and Move to…, USB pickers, cancel and watchdog, readable names |
 | **Patcher** | Apply IPS/BPS patches (hacks, translations) to a game; the result is a new game, the original stays |
 | **Game database submissions** | Guide and GitHub issue form for sharing `gamedb-local.csv` and `cddb-local.csv` entries |
 
