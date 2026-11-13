@@ -478,6 +478,7 @@ static void scan_library(void)
         npin = 0;
         special("__PADTEST__", "Controller test");
         special("__ABOUT__", "About");
+        special("__REPORT__", "Save bug report");
         special("__RETROARCH__", "RetroArch (advanced)");
         special("__RESTART__", "Restart console");
         return;
@@ -2577,6 +2578,11 @@ int main(int argc, char **argv)
                     run_padtest(); qhead = qtail = 0; held = 0;
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__ABOUT__")) {
                     mode = M_ABOUT;
+                } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__REPORT__") && usb_dev[0]) {
+                    FILE *f = fopen(argv[2], "w");
+                    if (f) { fprintf(f, "__USB__:report:%s\n", usb_dev); fclose(f); }
+                    SDL_Log("exit: bug report to usb %s", usb_dev);
+                    _exit(0);
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__USB__")) {
                     mode = M_USB; opt = 0;
                 } else if (a == A_OK || a == A_RUN) {
@@ -2608,12 +2614,13 @@ int main(int argc, char **argv)
                 }
             } else if (mode == M_USB) {
                 if (a == A_UP && opt > 0) opt--;
-                else if (a == A_DOWN && opt < 2) opt++;
-                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == 2)) mode = M_LIST;
+                else if (a == A_DOWN && opt < 3) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == 3)) mode = M_LIST;
                 else if (a == A_OK || a == A_RUN) {
+                    static const char *job[] = { "import", "export", "report" };
                     FILE *f = fopen(argv[2], "w");
-                    if (f) { fprintf(f, "__USB__:%s:%s\n", opt == 0 ? "import" : "export", usb_dev); fclose(f); }
-                    SDL_Log("exit: usb %s %s", opt == 0 ? "import" : "export", usb_dev);
+                    if (f) { fprintf(f, "__USB__:%s:%s\n", job[opt], usb_dev); fclose(f); }
+                    SDL_Log("exit: usb %s %s", job[opt], usb_dev);
                     _exit(0);
                 }
             } else if (mode == M_PLAY) {
@@ -2896,6 +2903,8 @@ int main(int argc, char **argv)
                                    : !strcmp(games[sel].path, "__USB__") ? "I / RUN  Copy games and saves from or to the USB stick"
                                    : !strcmp(games[sel].path, "__PADTEST__") ? "I / RUN  Check that every button works"
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
+                                   : !strcmp(games[sel].path, "__REPORT__") ? (usb_dev[0] ? "I / RUN  Logs in one .zip, saved to the USB stick (no games or saves)"
+                                                                                       : "I / RUN  Logs in one .zip, saved to the logs folder on the SD card")
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"
                                    : "I / RUN  Restart the console")
                                   : games[sel].check == C_MOD ? "Doesn't match the known copy: a hack, a revision or a bad read. Re-insert the HuCard to check"
@@ -2918,11 +2927,11 @@ int main(int argc, char **argv)
             }
         }
         if (mode == M_USB) {
-            static const char *items[] = { "Import games and saves from the stick", "Export games and saves to the stick", "Cancel" };
-            int pw = W * 56 / 100, ph = row_h * 5, px, py;
+            static const char *items[] = { "Import games and saves from the stick", "Export games and saves to the stick", "Export a bug report", "Cancel" };
+            int pw = W * 56 / 100, ph = row_h * 6, px, py;
             panel(pw, ph, &px, &py);
             text(f_hint, "USB stick (FAT32)", dim, px + pw / 2, py + row_h / 3, 1);
-            for (i = 0; i < 3; i++) {
+            for (i = 0; i < 4; i++) {
                 int y = py + row_h * (i + 1) + row_h / 4;
                 if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
                 text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);

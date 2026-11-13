@@ -43,6 +43,7 @@ It is installed by a script that patches **your own** SD card. ArchGX doesn't co
 
 **Extras**
 - Controller test.
+- One-button bug report: every log in one .zip, on a USB stick or the SD card.
 - About screen.
 - Progress screens while a cart is read.
 - Automatic recovery if the display system crashes.

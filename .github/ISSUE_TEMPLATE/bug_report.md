@@ -10,5 +10,7 @@ labels: bug
 
 **ArchGX version** (Game Library → About):
 
-**Logs:** please attach the files from the card's `logs/` folder
-(`gx-start.log`, `retroarch.log`, `retroarch.log.1`, `ingame.log`, `launcher.log`).
+**Bug report zip:** on the console, Settings tab → **Save bug report**
+(saved to a USB stick if one is in, otherwise to `logs/` on the SD card).
+Drag `ArchGX-report-XXX.zip` into this issue. If a game crashed, also
+attach `logs/last-crash.zip`.

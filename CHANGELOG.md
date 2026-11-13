@@ -1,8 +1,10 @@
 # Changelog
 
-## GP2-beta12: Settings tab
+## GP2-beta12: Settings tab, bug reports
 
 - **Settings tab** after CD Games: Controller test, About, RetroArch (advanced) and Restart console moved here, so the game tabs list only games, your folders and the pinned HuCard / CD / USB entries. Left from Recent wraps to Settings. The Debug screen is still SELECT held on About.
+- **Save bug report** (Settings tab, and "Export a bug report" in the USB menu): every log plus a system summary in one .zip, saved to the USB stick or to `logs/` on the card. No games, saves or BIOS inside. New `zipit` tool writes a .zip any computer opens.
+- **Automatic crash report:** when a game won't start or RetroArch quits with a real error, `logs/last-crash.zip` is saved.
 - **USB pickers:** "Clear all ticks" under Everything.
 - The six tabs are spaced to fit the screen; an empty tab no longer shows a cursor.
 

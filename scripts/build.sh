@@ -54,6 +54,10 @@ echo "== fat-label"
 $CC $CFLAGS -o "$OUT/obj/fat-label" "$TOP/src/fat-label/fat-label.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
 $STRIP -o "$PAY/usr/bin/fat-label" "$OUT/obj/fat-label"
 
+echo "== zipit"
+$CC $CFLAGS -o "$OUT/obj/zipit" "$TOP/src/zipit/zipit.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
+$STRIP -o "$PAY/usr/bin/zipit" "$OUT/obj/zipit"
+
 echo "== RetroArch $RA_TAG + ArchGX patch"
 RA=${RA_SRC:-$OUT/RetroArch}
 if [ -z "${RA_SRC:-}" ]; then

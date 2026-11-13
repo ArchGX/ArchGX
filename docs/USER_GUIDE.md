@@ -121,4 +121,20 @@ The console recovers by itself:
 - if the display system stops, ArchGX restarts it;
 - if that fails, the console reboots.
 
-For a bug report, take the `logs/` folder from the card and open an issue on GitHub.
+### Reporting a bug
+
+1. Go to the **Settings** tab and choose **Save bug report** (or **Export a bug report** in the USB stick menu).
+   - With a USB stick in, `ArchGX-report-001.zip` (then 002, 003…) is saved on the stick.
+   - Without one, it goes to the `logs/` folder on the SD card.
+2. Open an issue at https://github.com/ArchGX/ArchGX/issues, say what happened, and attach the zip.
+
+The zip holds the logs, a system summary (version, card space, settings, USB devices, kernel messages) and the list of game file names. It never contains games, saves or BIOS files.
+
+If a game fails to start or RetroArch quits with an error, ArchGX saves `logs/last-crash.zip` by itself, so the evidence is there even if you report it later.
+
+### Known issues
+
+- **RetroArch ends every game with exit code 139.** It crashes while closing, after your game is saved. It's harmless and is on the roadmap.
+- **CD copying runs at about 1 MB/s** on the console's USB 2.0 port. A full disc can take 10 minutes or more. Damaged areas are skipped and the copy carries on.
+- **CD games are beta.** Some USB CD drives don't like the large reads; ArchGX slows down automatically when that happens.
+

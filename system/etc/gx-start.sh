@@ -459,8 +459,12 @@ run_game() {
 	rm -f $STATES_TMP/*; persist_ra
 	log "game ended (retroarch exit $rc)"
 	session_stats "$title" $rc
+	[ -n "$started" ] && case $rc in 0|139) ;; *) bug_report $LOGD last-crash.zip > /dev/null && log "crash report: logs/last-crash.zip" ;; esac
 	ensure_display
-	[ -z "$started" ] && show_error "Could not start $title" "See logs/retroarch.log"
+	if [ -z "$started" ]; then
+		bug_report $LOGD last-crash.zip > /dev/null && log "crash report: logs/last-crash.zip"
+		show_error "Could not start $title" "A bug report was saved: logs/last-crash.zip"
+	fi
 }
 
 # dropped frames (RetroArch prints them when it closes): one line per game in
@@ -807,6 +811,60 @@ copy_watched() {
 	wait $cpid || { rm -f "$2.part"; return 1; }
 	mv "$2.part" "$2" || return 1
 }
+# ------------------------------------------------------- bug reports
+# One .zip with every log and a system summary, safe to post publicly (no
+# games, saves or BIOS). $1 = the folder to write it to; the file is named
+# ArchGX-report-001.zip, -002... (the console has no reliable clock), or
+# $2 when given. Prints the file name.
+bug_report() {
+	rd=$TMP/report; rm -rf $rd; mkdir -p $rd
+	for f in gx-start.log gx-start.log.1 retroarch.log retroarch.log.1 launcher.log ingame.log weston.log last-session.txt last-cart.crc; do
+		[ -f "$LOGD/$f" ] && tail -c 2000000 "$LOGD/$f" > "$rd/$f"
+	done
+	{
+		cat /etc/archgx-release 2>/dev/null
+		echo "uptime: $(cut -d' ' -f1 /proc/uptime) s"
+		echo; echo "== card"; df -h "$ROM" 2>/dev/null
+		echo; echo "== debug.cfg"; cat "$DEBUG_CFG" 2>/dev/null
+		echo; echo "== archgx-settings.cfg"; cat "$SETTINGS" 2>/dev/null
+		echo; echo "== USB devices"; for d in "$SYS"/bus/usb/devices/*; do
+			[ -f "$d/idVendor" ] && echo "$(basename "$d") $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"; done
+		echo; echo "== processes"; ps 2>/dev/null
+		echo; echo "== kernel messages (last 300)"; dmesg 2>/dev/null | tail -300
+	} > $rd/system.txt 2>&1
+	{ echo "file	state	crc32"; cat "$READCHECK" 2>/dev/null; } > $rd/games.txt
+	( cd "$GAMES" 2>/dev/null && find . -type f | sed 's#^\./##' | sort ) > $rd/library-files.txt
+	name=$2
+	if [ -z "$name" ]; then
+		i=1; while [ -e "$1/ArchGX-report-$(printf %03d $i).zip" ]; do i=$((i + 1)); done
+		name=ArchGX-report-$(printf %03d $i).zip
+	fi
+	zipit "$1/$name.part" $rd && mv "$1/$name.part" "$1/$name" || { rm -f "$1/$name.part"; rm -rf $rd; return 1; }
+	rm -rf $rd; sync
+	echo "$name"
+}
+# "Save bug report" (Settings tab, or the USB menu): to the stick when one is
+# in, else to logs/ on the SD card
+report_job() {
+	dev=$1; dest=$LOGD; where="the SD card (logs folder)"
+	status_show "Saving a bug report..." "" "-"
+	if [ -n "$dev" ]; then
+		mkdir -p $USB_MNT; umount $USB_MNT 2>/dev/null
+		if with_timeout 30 mount -t vfat -o rw,noatime,shortname=mixed /dev/$dev $USB_MNT 2>> "$LOG"; then
+			dest=$USB_MNT; where="the USB stick"
+		else log "report: cannot mount /dev/$dev, saving to the card"; fi
+	fi
+	if f=$(bug_report $dest); then
+		log "report: $f saved to $where"
+		status "Bug report saved" "$f on $where" "" ""; sleep 4
+	else
+		log "report: failed"
+		status "Could not save the bug report" "Is the card or stick full?" "" error; sleep 3
+	fi
+	[ "$dest" = $USB_MNT ] && usb_unmount
+	status_close
+}
+
 # USB stick (FAT32): "__USB__:import:sdb1" or "__USB__:export:sdb1". The picker
 # (pce-launcher --pick) lists what to copy; "__ALL__" means everything.
 #  import: games/ (keeping its folders), saves/, bios/ and patches/ from the
@@ -1014,6 +1072,8 @@ while :; do
 	0:__RESTART__)    log "restart requested"; sync; reboot; exit 0 ;;
 	0:__RETROARCH__)  run_retroarch_menu; fails=0 ;;
 	0:__RIPCD__)      rip_cd; fails=0 ;;
+	0:__USB__:report:*) report_job "${choice#__USB__:report:}"; fails=0 ;;
+	0:__REPORT__)     report_job ""; fails=0 ;;
 	0:__USB__:*)      m=${choice#__USB__:}; usb_job "${m%%:*}" "${m#*:}"; fails=0 ;;
 	0:?*)             run_game "$choice" "$how"; fails=0 ;;
 	*)              fails=$((fails+1)); log "picker exited ($rc)"; ensure_display
