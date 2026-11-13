@@ -12,5 +12,5 @@ labels: bug
 
 **Bug report zip:** on the console, Settings tab → **Save bug report**
 (saved to a USB stick if one is in, otherwise to `logs/` on the SD card).
-Drag `ArchGX-report-XXX.zip` into this issue. If a game crashed, also
+Drag `ArchGX-report-XXX_USB.zip (or _SD.zip)` into this issue. If a game crashed, also
 attach `logs/last-crash.zip`.

@@ -1,5 +1,11 @@
 # Changelog
 
+## GP2-beta13: back where you left off, smarter sorting
+
+- **The library remembers your place:** after a game, Controller test, RetroArch (advanced) or a USB copy you're back on the same tab, folder and game. (Earlier betas tried to remember the last game but saved it to a folder that doesn't exist on the console.) A new HuCard dump or CD copy opens on that game's tab. A fresh power-on still opens on Recent.
+- **Games in any folder are sorted:** games copied into `games/` outside the tabs, loose or in folders with any name (an imported `SGX` folder, say), are moved into their tabs: known SuperGrafx games to SuperGrafx, US games to TurboGrafx-16, CDs to CD Games. Folders left empty are removed; other files stay where they are.
+- **Bug report names say where they were saved:** `ArchGX-report-001_USB.zip` or `ArchGX-report-001_SD.zip`.
+
 ## GP2-beta12: Settings tab, bug reports
 
 - **Settings tab** after CD Games: Controller test, About, RetroArch (advanced) and Restart console moved here, so the game tabs list only games, your folders and the pinned HuCard / CD / USB entries. Left from Recent wraps to Settings. The Debug screen is still SELECT held on About.

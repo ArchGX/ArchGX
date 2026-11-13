@@ -250,27 +250,44 @@ F_PCE="$GAMES/PC Engine"; F_TG="$GAMES/TurboGrafx-16"; F_SGX="$GAMES/SuperGrafx"
 game_folder() {
 	if [ "$1" = sgx ]; then echo "$F_SGX"; elif [ -n "$tg16" ]; then echo "$F_TG"; else echo "$F_PCE"; fi
 }
-# Games dropped loose in games/ (copied from a computer or a USB stick) are
-# moved into the library's folders; folders and files elsewhere stay put.
+# the tab folder a game file belongs in ("" = not a game)
+tab_of() {
+	case "$1" in
+	*.[cC][hH][dD]) echo "$F_CD" ;;                 # one-file CD images (a loose .cue needs its tracks)
+	*.[sS][gG][xX]) echo "$F_SGX" ;;
+	*.[pP][cC][eE])
+		if [ "$(game_kind "$1")" = sgx ]; then echo "$F_SGX"        # a known SuperGrafx game
+		else case "$(basename "$1")" in
+			*"(USA)"*|*"(U)"*|*"(US)"*) echo "$F_TG" ;;
+			*) echo "$F_PCE" ;;
+		esac; fi ;;
+	esac
+}
+is_disc_dir() { for c in "$1"/*.cue "$1"/*.chd "$1"/*.ccd "$1"/*.m3u; do [ -f "$c" ] && return 0; done; return 1; }
+sort_one() {       # $1 = a game file or a CD's folder: into its tab, unless already there
+	if [ -d "$1" ]; then dst=$F_CD; else dst=$(tab_of "$1"); fi
+	[ -n "$dst" ] && [ ! -e "$dst/$(basename "$1")" ] && mv "$1" "$dst/" && sn=$((sn+1))
+}
+# Games dropped in games/ outside the tabs (copied from a computer or a USB
+# stick, loose or in folders of any name) are moved into their tabs: known
+# SuperGrafx games to SuperGrafx, US games to TurboGrafx-16, CDs to CD Games.
+# A folder left empty is removed; anything else stays where it is.
 sort_root() {
 	sn=0
 	for f in "$GAMES"/*; do
 		[ -e "$f" ] || continue
-		b=$(basename "$f"); dst=""
-		case "$b" in "PC Engine"|"TurboGrafx-16"|SuperGrafx|"CD Games") continue ;; esac
-		if [ -d "$f" ]; then
-			for c in "$f"/*.cue "$f"/*.chd "$f"/*.ccd "$f"/*.m3u; do [ -f "$c" ] && dst=$F_CD; done   # a CD game's folder
-		else
-			case "$b" in
-			*.sgx|*.SGX) dst=$F_SGX ;;
-			*"(USA)"*.pce|*"(U)"*.pce|*"(US)"*.pce|*"(USA)"*.PCE|*"(U)"*.PCE) dst=$F_TG ;;
-			*.pce|*.PCE) dst=$F_PCE ;;
-			*.chd|*.CHD) dst=$F_CD ;;               # one-file CD images (a loose .cue needs its tracks: left alone)
-			esac
+		case "$(basename "$f")" in "PC Engine"|"TurboGrafx-16"|SuperGrafx|"CD Games") continue ;; esac
+		if [ -f "$f" ]; then sort_one "$f"
+		elif is_disc_dir "$f"; then sort_one "$f"
+		elif [ -d "$f" ]; then
+			for g in "$f"/*; do
+				if [ -f "$g" ]; then sort_one "$g"
+				elif [ -d "$g" ] && is_disc_dir "$g"; then sort_one "$g"; fi
+			done
+			rmdir "$f" 2>/dev/null && log "library: removed the empty folder $(basename "$f")"
 		fi
-		[ -n "$dst" ] && [ ! -e "$dst/$b" ] && mv "$f" "$dst/" && sn=$((sn+1))
 	done
-	[ $sn -gt 0 ] && { sync; log "library: moved $sn game(s) into the system folders"; }
+	[ $sn -gt 0 ] && { sync; log "library: moved $sn game(s) into their tabs"; }
 }
 
 safe_name() { echo "$1" | sed 's#[\\/:*?"<>|]#-#g; s/[. ]*$//'; }
@@ -556,6 +573,9 @@ normalize() {
 }
 
 ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
+# the library opens on this game's tab when the game ends (the picker keeps
+# its own place otherwise, in this RAM file)
+focus_game() { echo "$1" > $TMP/library-pos.txt; }
 
 # read-check.txt: "file<TAB>state<TAB>crc32" (last line wins), one line per
 # HuCard in the library. state: ok = matches the game database (green in the
@@ -698,7 +718,7 @@ play_cart() {
 		# unknown: let the player choose PC Engine, SuperGrafx or System Card
 		status_close; ASK_GAME=$game; return
 	fi
-	touch $TMP/cart_game; run_game "$game"; rm -f $TMP/cart_game
+	focus_game "$game"; touch $TMP/cart_game; run_game "$game"; rm -f $TMP/cart_game
 }
 
 # "Play the CD in the drive": copy a disc from a USB CD drive into games/
@@ -725,7 +745,7 @@ rip_cd() {
 	old=""; [ -n "$id" ] && old=$(find "$GAMES" -name "cd-$id.cue" 2>/dev/null | head -1)
 	if [ -n "$old" ]; then
 		log "cd: disc $id is already in the library: $old"
-		status_close; run_game "$old"; return
+		status_close; focus_game "$old"; run_game "$old"; return
 	fi
 	mkdir -p "$F_CD"
 	out=$(/usr/bin/cd-rip $CD_DEV "$F_CD" $TMP/status 2>> "$LOG"); rc=$?
@@ -741,7 +761,7 @@ rip_cd() {
 		if [ $rc = 4 ]; then
 			status_show "CD copied, but some sectors could not be read" "Clean the disc and copy it again if the game misbehaves" "" error; sleep 4
 		fi
-		status_close
+		status_close; focus_game "$cue"
 		run_game "$cue" ;;
 	2)	show_error "No disc in the drive" "Insert a PC Engine CD and try again" ;;
 	3)	sleep 3; status_close ;;                     # cd-rip showed "Not enough space"
@@ -836,8 +856,9 @@ bug_report() {
 	( cd "$GAMES" 2>/dev/null && find . -type f | sed 's#^\./##' | sort ) > $rd/library-files.txt
 	name=$2
 	if [ -z "$name" ]; then
-		i=1; while [ -e "$1/ArchGX-report-$(printf %03d $i).zip" ]; do i=$((i + 1)); done
-		name=ArchGX-report-$(printf %03d $i).zip
+		sfx=_SD; [ "$1" = "$USB_MNT" ] && sfx=_USB      # where it was saved
+		i=1; while [ -e "$1/ArchGX-report-$(printf %03d $i)$sfx.zip" ]; do i=$((i + 1)); done
+		name=ArchGX-report-$(printf %03d $i)$sfx.zip
 	fi
 	zipit "$1/$name.part" $rd && mv "$1/$name.part" "$1/$name" || { rm -f "$1/$name.part"; rm -rf $rd; return 1; }
 	rm -rf $rd; sync

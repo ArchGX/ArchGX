@@ -124,8 +124,8 @@ The console recovers by itself:
 ### Reporting a bug
 
 1. Go to the **Settings** tab and choose **Save bug report** (or **Export a bug report** in the USB stick menu).
-   - With a USB stick in, `ArchGX-report-001.zip` (then 002, 003…) is saved on the stick.
-   - Without one, it goes to the `logs/` folder on the SD card.
+   - With a USB stick in, `ArchGX-report-001_USB.zip` (then 002, 003…) is saved on the stick.
+   - Without one, `ArchGX-report-001_SD.zip` goes to the `logs/` folder on the SD card.
 2. Open an issue at https://github.com/ArchGX/ArchGX/issues, say what happened, and attach the zip.
 
 The zip holds the logs, a system summary (version, card space, settings, USB devices, kernel messages) and the list of game file names. It never contains games, saves or BIOS files.

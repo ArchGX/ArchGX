@@ -50,7 +50,7 @@
 #define BG_PATH "/usr/share/archgx/background.png"
 #endif
 #ifndef LAST_FILE
-#define LAST_FILE "/tmp/library/last.txt"
+#define LAST_FILE "/tmp/gx/library-pos.txt"   /* RAM: a fresh power-on starts on Recent */
 #endif
 
 /* ------------------------------------------------------------------ data */
@@ -68,7 +68,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
  * games outside them go to the tab of their kind. Recent: the 5 last played. */
 enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
 static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
-#define ARCHGX_VERSION "GP2-beta12"
+#define ARCHGX_VERSION "GP2-beta13"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -1042,11 +1042,37 @@ static void on_crash(int s)
     _exit(128 + s);
 }
 
+/* Where the library was left: "path\ntab\nfolder". gx-start writes only a
+ * path after a new dump or CD copy: then that game's tab is opened. */
+static const char *pos_file(void) { return getenv("PCE_LAUNCHER_POS") ? getenv("PCE_LAUNCHER_POS") : LAST_FILE; }
+static int tab_for_path(const char *path);
+static void load_pos(void)
+{
+    char path[1024] = "", tab[16] = "", folder[sizeof cur_folder] = "";
+    FILE *f = fopen(pos_file(), "r");
+    if (!f) return;
+    if (fgets(path, sizeof path, f) && fgets(tab, sizeof tab, f)) { if (!fgets(folder, sizeof folder, f)) folder[0] = 0; }
+    fclose(f);
+    path[strcspn(path, "\n")] = 0; tab[strcspn(tab, "\n")] = 0; folder[strcspn(folder, "\n")] = 0;
+    if (!path[0]) return;
+    if (tab[0] && atoi(tab) >= 0 && atoi(tab) < T_N) { cur_tab = atoi(tab); snprintf(cur_folder, sizeof cur_folder, "%s", folder); }
+    else if (path[0] == '/') {                    /* a new or re-inserted game: its tab, and its folder */
+        size_t n = strlen(lib_dir);
+        char rel[1024], *sl;
+        cur_tab = tab_for_path(path); cur_folder[0] = 0;
+        if (cur_tab && !strncmp(path, lib_dir, n) && path[n] == '/' && !strncmp(path + n + 1, tab_name[cur_tab], strlen(tab_name[cur_tab]))) {
+            snprintf(rel, sizeof rel, "%s", path + n + 1 + strlen(tab_name[cur_tab]));   /* "/RPG/x.pce" */
+            if ((sl = strrchr(rel, '/'))) *sl = 0;                                      /* "/RPG" */
+            if (cur_tab == T_CD && (sl = strrchr(rel, '/'))) *sl = 0;                  /* a CD's own folder */
+            if (rel[0] == '/' && !strchr(rel + 1, '/')) snprintf(cur_folder, sizeof cur_folder, "%s", rel + 1);
+        }
+    }
+}
 static int load_last(void)
 {
     char buf[1024];
     int i;
-    FILE *f = fopen(LAST_FILE, "r");
+    FILE *f = fopen(pos_file(), "r");
     if (!f) return nreal ? npin : 0;
     if (!fgets(buf, sizeof buf, f)) { fclose(f); return nreal ? npin : 0; }
     fclose(f);
@@ -1069,8 +1095,8 @@ static int tab_for_path(const char *path)
 
 static void save_last(const char *p)
 {
-    FILE *f = fopen(LAST_FILE, "w");
-    if (f) { fprintf(f, "%s\n", p); fclose(f); }
+    FILE *f = fopen(pos_file(), "w");
+    if (f) { fprintf(f, "%s\n%d\n%s\n", p, cur_tab, cur_folder); fclose(f); }
 }
 
 /* ----------------------------------------------------------- rendering */
@@ -2453,7 +2479,9 @@ int main(int argc, char **argv)
     cd_check();
     usb_check();
     if (getenv("PCE_LAUNCHER_ASK")) cur_tab = tab_for_path(getenv("PCE_LAUNCHER_ASK"));
+    else load_pos();                                /* back where you left off */
     scan_library();
+    if (cur_folder[0] && !nreal) { cur_folder[0] = 0; scan_library(); }   /* the folder has gone */
     SDL_Log("screen %dx%d, %d games, data dir %s", W, H, ntotal, data_dir);
     for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
 
@@ -2581,6 +2609,7 @@ int main(int argc, char **argv)
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__REPORT__") && usb_dev[0]) {
                     FILE *f = fopen(argv[2], "w");
                     if (f) { fprintf(f, "__USB__:report:%s\n", usb_dev); fclose(f); }
+                    save_last(games[sel].path);
                     SDL_Log("exit: bug report to usb %s", usb_dev);
                     _exit(0);
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__USB__")) {
@@ -2620,6 +2649,7 @@ int main(int argc, char **argv)
                     static const char *job[] = { "import", "export", "report" };
                     FILE *f = fopen(argv[2], "w");
                     if (f) { fprintf(f, "__USB__:%s:%s\n", job[opt], usb_dev); fclose(f); }
+                    save_last(games[sel].path);
                     SDL_Log("exit: usb %s %s", job[opt], usb_dev);
                     _exit(0);
                 }
