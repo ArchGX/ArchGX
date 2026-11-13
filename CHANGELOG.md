@@ -1,5 +1,11 @@
 # Changelog
 
+## GP2-beta12: Settings tab
+
+- **Settings tab** after CD Games: Controller test, About, RetroArch (advanced) and Restart console moved here, so the game tabs list only games, your folders and the pinned HuCard / CD / USB entries. Left from Recent wraps to Settings. The Debug screen is still SELECT held on About.
+- **USB pickers:** "Clear all ticks" under Everything.
+- The six tabs are spaced to fit the screen; an empty tab no longer shows a cursor.
+
 ## GP2-beta11: folders of your own, Move to…, USB pickers, safer copies
 
 - **Fix:** beta10 refused every HuCard that isn't a US card ("Could not prepare the game").

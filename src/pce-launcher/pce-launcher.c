@@ -66,9 +66,9 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
 
 /* Library tabs (Left/Right). Each system tab is also a folder in games/;
  * games outside them go to the tab of their kind. Recent: the 5 last played. */
-enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_N };
-static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games" };
-#define ARCHGX_VERSION "GP2-beta11"
+enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
+static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
+#define ARCHGX_VERSION "GP2-beta12"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -252,7 +252,7 @@ static int stock_tab(const char *dir)
     size_t n = strlen(lib_dir), k;
     int t;
     if (strncmp(dir, lib_dir, n) || dir[n] != '/') return 0;
-    for (t = T_PCE; t < T_N; t++) {
+    for (t = T_PCE; t < T_SET; t++) {
         k = strlen(tab_name[t]);
         if (!strncmp(dir + n + 1, tab_name[t], k) && (dir[n + 1 + k] == '/' || !dir[n + 1 + k])) return t;
     }
@@ -450,7 +450,7 @@ static void scan_library(void)
     free_games();
     load_titles();
     scan_dir(lib_dir, 0);
-    for (k = T_PCE; k < T_N; k++) { snprintf(p, sizeof p, "%s/%s", lib_dir, tab_name[k]); scan_dir(p, 0); }
+    for (k = T_PCE; k < T_SET; k++) { snprintf(p, sizeof p, "%s/%s", lib_dir, tab_name[k]); scan_dir(p, 0); }
     ntotal = ngames;
     memset(tab_count, 0, sizeof tab_count);
     for (i = 0; i < ngames; i++) {
@@ -461,11 +461,12 @@ static void scan_library(void)
     for (i = 0; i < ngames; i++) if (games[i].kind == K_DIR) ntotal--;
     if (cur_tab < 0) {                              /* first time: Recent, else the first tab with games */
         cur_tab = T_RECENT;
-        if (!tab_count[T_RECENT]) for (cur_tab = T_PCE; cur_tab < T_N - 1 && !tab_count[cur_tab]; cur_tab++) ;
+        if (!tab_count[T_RECENT]) for (cur_tab = T_PCE; cur_tab < T_CD && !tab_count[cur_tab]; cur_tab++) ;
         if (!tab_count[cur_tab]) cur_tab = T_PCE;
     }
     for (i = k = 0; i < ngames; i++) {              /* keep this tab's games */
-        if (cur_tab == T_RECENT ? games[i].recent > 0 && games[i].kind != K_DIR
+        if (cur_tab == T_SET) ;                     /* Settings: no games */
+        else if (cur_tab == T_RECENT ? games[i].recent > 0 && games[i].kind != K_DIR
                                 : games[i].tab == cur_tab && !strcmp(games[i].folder, cur_folder)) { games[k++] = games[i]; continue; }
         free(games[i].path); free(games[i].label);
         if (games[i].tex) SDL_DestroyTexture(games[i].tex);
@@ -473,6 +474,14 @@ static void scan_library(void)
     ngames = nreal = k;
     qsort(games, ngames, sizeof(Game), cmp_games);
     /* pinned entries first, in every tab */
+    if (cur_tab == T_SET) {                         /* Settings: the utilities only */
+        npin = 0;
+        special("__PADTEST__", "Controller test");
+        special("__ABOUT__", "About");
+        special("__RETROARCH__", "RetroArch (advanced)");
+        special("__RESTART__", "Restart console");
+        return;
+    }
     np = (usb_dev[0] != 0) + (cd_present != 0) + (getenv("PCE_LAUNCHER_CART") != NULL);
     memmove(games + np, games, sizeof(Game) * ngames);
     k = ngames; ngames = 0;
@@ -480,10 +489,6 @@ static void scan_library(void)
     if (cd_present) special("__RIPCD__", "Play the CD in the drive");
     if (usb_dev[0]) special("__USB__", "USB stick: import or export games");
     npin = ngames; ngames = npin + k;
-    special("__PADTEST__", "Controller test");
-    special("__ABOUT__", "About");
-    special("__RETROARCH__", "RetroArch (advanced)");
-    special("__RESTART__", "Restart console");
 }
 
 /* a USB stick in a front port: the first sd* disk that isn't the cart reader
@@ -2197,7 +2202,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
     }
     for (;;) {
         SDL_Event ev;
-        int a, atroot = !strcmp(cur, root), first = 1, n = npk + first;   /* entry 0: "everything" at the top, ".." below */
+        int a, atroot = !strcmp(cur, root), first = atroot ? 2 : 1, n = npk + first;   /* top: "everything" and "clear" at the root, ".." below */
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) _exit(0);
             if (ev.type == SDL_KEYDOWN) push(key_action(ev.key.keysym.sym));
@@ -2217,7 +2222,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
         if (quit_flag) _exit(0);
         while ((a = pop()) != A_NONE) {
             const PickEnt *e;
-            atroot = !strcmp(cur, root); n = npk + first;
+            atroot = !strcmp(cur, root); first = atroot ? 2 : 1; n = npk + first;
             if (sel >= n) sel = n - 1;
             e = sel >= first ? &pk[sel - first] : NULL;
             char p[1200];
@@ -2231,6 +2236,9 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
                     if (sl) *sl = 0;
                     pk_scan(cur, export); sel = 0; top = 0;
                 }
+            } else if (a == A_OK && !e && sel == 1) {                     /* clear all ticks */
+                while (npk_tick) free(pk_tick[--npk_tick]);
+                all = 0;
             } else if (a == A_OK && !e) all = !all;                      /* everything */
             else if (a == A_OK && e && e->dir && !e->disc) {              /* open a folder */
                 snprintf(cur, sizeof cur, "%s", p); pk_scan(cur, export); sel = 0; top = 0;
@@ -2246,7 +2254,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
                 _exit(0);
             }
         }
-        atroot = !strcmp(cur, root); n = npk + first;
+        atroot = !strcmp(cur, root); first = atroot ? 2 : 1; n = npk + first;
         if (sel >= n) sel = n ? n - 1 : 0;
         if (sel < top) top = sel;
         if (sel >= top + rows) top = sel - rows + 1;
@@ -2267,6 +2275,10 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
             const char *lab, *tag = "";
             char p[1200];
             if (k == sel) fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
+            if (k == 1 && atroot) {
+                text(f_item, "Clear all ticks", accent, list_x + W / 60, y + (row_h - 4 - TTF_FontHeight(f_item)) / 2, 0);
+                continue;
+            }
             if (k < first) {
                 lab = atroot ? (export ? "Everything (all games and saves)" : "Everything (games, saves, BIOS, patches)") : "..  (back)";
                 on = atroot && all;
@@ -2539,7 +2551,8 @@ int main(int argc, char **argv)
             }
 
             if (mode == M_LIST) {
-                if (a == A_UP || a == A_DOWN) {
+                if (!ngames && a != A_LEFT && a != A_RIGHT) ;    /* an empty tab */
+                else if (a == A_UP || a == A_DOWN) {
                     sel += a == A_UP ? -1 : 1;
                     if (sel < 0) sel = ngames - 1;
                     if (sel >= ngames) sel = 0;
@@ -2590,6 +2603,7 @@ int main(int argc, char **argv)
                     else snprintf(msg, sizeof msg, r == -2 ? "Already there: a game with that name exists" : "Could not move \"%s\"", lab);
                     scan_library();
                     if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                     mode = M_MESSAGE; msg_until = now + 2000;
                 }
             } else if (mode == M_USB) {
@@ -2629,6 +2643,7 @@ int main(int argc, char **argv)
                         else snprintf(msg, sizeof msg, "Could not save it as a System Card");
                         scan_library();
                         if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                         mode = M_MESSAGE; msg_until = now + 3000;
                     }
                     if (play) {
@@ -2669,6 +2684,7 @@ int main(int argc, char **argv)
                         else snprintf(msg, sizeof msg, "Could not save \"%s\" as a System Card", lab);
                         scan_library();
                         if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                         mode = M_MESSAGE; msg_until = now + 3000;
                     }
                 }
@@ -2685,6 +2701,7 @@ int main(int argc, char **argv)
                     else snprintf(msg, sizeof msg, "Could not delete \"%s\"", lab);
                     scan_library();
                     if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                     mode = M_MESSAGE; msg_until = now + 2000;
                 }
             } else if (mode == M_KEYBOARD) {
@@ -2731,6 +2748,7 @@ int main(int argc, char **argv)
                         else snprintf(msg, sizeof msg, "Could not move it to \"%s\"", safe);
                         scan_library();
                         if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                     } else if (kb_for == KB_FOR_FOLDER) {        /* rename a folder of your own */
                         char safe[NAME_MAX_LEN + 1], nd[1200];
                         const char *sl = strrchr(games[sel].path, '/');
@@ -2767,6 +2785,7 @@ int main(int argc, char **argv)
                     scan_library();
                     for (i = 0; i < ngames; i++) if (!strcmp(games[i].path, keep)) { sel = i; break; }
                     if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                     dirty = 1;
                 }
             }
@@ -2791,14 +2810,21 @@ int main(int argc, char **argv)
         {
             int eh = TTF_FontHeight(f_title), ew = draw_img(tex_emblem, list_x, H * 3 / 100, eh, 0), t, x = list_x;
             text(f_title, "Game Library", white, list_x + (ew ? ew + W / 80 : 0), H * 3 / 100, 0);
+            char labs[T_N][48];
+            int tw[T_N], sum = 0, gap;
+            for (t = 0; t < T_N; t++) {
+                snprintf(labs[t], sizeof labs[t], t == T_RECENT || t == T_SET ? "%s" : "%s (%d)", tab_name[t], tab_count[t]);
+                tw[t] = 0; TTF_SizeUTF8(f_hint, labs[t], &tw[t], NULL); sum += tw[t];
+            }
+            gap = (list_w - sum) / (T_N - 1);           /* six tabs: spread over the list's width */
+            if (gap > W / 28) gap = W / 28;
+            if (gap < W / 80) gap = W / 80;
             for (t = 0; t < T_N; t++) {                  /* tabs: Left/Right */
-                char lab[48];
-                int w = 0;
-                snprintf(lab, sizeof lab, t == T_RECENT ? "%s" : "%s (%d)", tab_name[t], tab_count[t]);
-                TTF_SizeUTF8(f_hint, lab, &w, NULL);
+                const char *lab = labs[t];
+                int w = tw[t];
                 if (t == cur_tab) fill(x - W / 160, H * 105 / 1000, w + W / 80, TTF_FontHeight(f_hint) + H / 100, accent.r, accent.g, accent.b, 255);
-                text(f_hint, lab, t == cur_tab ? ink : (tab_count[t] ? white : dim), x, H * 11 / 100, 0);
-                x += w + W / 28;
+                text(f_hint, lab, t == cur_tab ? ink : (tab_count[t] || t == T_SET ? white : dim), x, H * 11 / 100, 0);
+                x += w + gap;
             }
         }
         {
@@ -2810,11 +2836,11 @@ int main(int argc, char **argv)
                 snprintf(c2, sizeof c2, "%s  -  %s", cur_folder, cnt);
                 snprintf(cnt, sizeof cnt, "%.63s", c2);
             }
-            text(f_hint, cnt, dim, list_x + list_w, H * 5 / 100, 2);
+            if (cur_tab != T_SET) text(f_hint, cnt, dim, list_x + list_w, H * 5 / 100, 2);
         }
         fill(list_x, H * 17 / 100, list_w, H / 240 + 1, accent.r, accent.g, accent.b, 255);
 
-        if (!nreal) {
+        if (!nreal && cur_tab != T_SET) {
             const char *m = cur_tab == T_RECENT ? "The games you play appear here." : !ntotal
                 ? "No games yet: insert a HuCard, or copy games (.pce .sgx .cue .chd) into \"games\" on the SD card."
                 : "No games in this tab.";
@@ -2864,7 +2890,8 @@ int main(int argc, char **argv)
             fill(list_x + list_w + W / 40, list_y, W / 320 + 1, track_h, 255, 255, 255, 50);
             fill(list_x + list_w + W / 40, bar_y, W / 320 + 1, bar_h, accent.r, accent.g, accent.b, 255);
         }
-        text(f_hint, !REAL(sel) ? (!strcmp(games[sel].path, "__CART__") ? "I / RUN  Play the HuCard that is in the slot"
+        if (!ngames) text(f_hint, "Left/Right  Tabs", dim, W / 2, H * 91 / 100, 1);
+        else text(f_hint, !REAL(sel) ? (!strcmp(games[sel].path, "__CART__") ? "I / RUN  Play the HuCard that is in the slot"
                                    : !strcmp(games[sel].path, "__RIPCD__") ? "I / RUN  Copy the CD to the SD card (first time only) and play it"
                                    : !strcmp(games[sel].path, "__USB__") ? "I / RUN  Copy games and saves from or to the USB stick"
                                    : !strcmp(games[sel].path, "__PADTEST__") ? "I / RUN  Check that every button works"

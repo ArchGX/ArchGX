@@ -25,10 +25,9 @@ The library lists every game in the card's `games/` folder by name. The five you
 - **SELECT** on a game opens its options: **Rename**, **Delete**, and for HuCards **Mark as SuperGrafx** (or back) and **Use as CD System Card**. Use these when a dump wasn't recognised automatically.
 - Rename changes only the name shown. The file and its saves stay matched, and naming an unknown HuCard also records it for the game database (see [GAMEDB.md](GAMEDB.md)).
 
-**Entries at the bottom of the list**
-- **Play the HuCard in the slot**: shown while a cart is inserted.
+**Settings tab** (the last tab; Left from Recent goes straight there)
 - **Controller test**: shows each connected pad. The d-pad, SELECT, RUN, II and I light up when pressed. Hold SELECT + RUN for a second to go back.
-- **About**: ArchGX version, number of games and save states, free space on the card.
+- **About**: ArchGX version, number of games and save states, free space on the card. Holding SELECT on it for 3 seconds opens the Debug screen.
 - **RetroArch (advanced)**: RetroArch's full menu, for advanced settings. Quit RetroArch to come back.
 - **Restart console**.
 
