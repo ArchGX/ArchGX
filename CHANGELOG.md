@@ -1,5 +1,14 @@
 # Changelog
 
+## GP2-beta10: library tabs, Rename renames the file, USB import/export, card name
+
+- **Tabs** (Left/Right): **Recent** (the 5 last played: a quick pick), **PC Engine**, **TurboGrafx-16**, **SuperGrafx**, **CD Games**, each with its game count. Each system tab is a folder in `games/`. New dumps go to the right one: SuperGrafx carts to SuperGrafx, bit-swapped (US) carts to TurboGrafx-16, other HuCards to PC Engine, copied CDs to CD Games. Games left loose in `games/` (copied from a computer or a USB stick) are moved into the folders at start-up; other folders stay where they are.
+- **Pinned entries:** "Play the HuCard in the slot", "Play the CD in the drive" and "USB stick" are at the top of every tab, when there is something to play or copy.
+- **Rename renames the file:** a HuCard's file and its saves get the new name (`cart-7ee8cdcd.pce` → `Neutopia II.pce`); a CD's folder is renamed (its tracks keep their names). The SD card now reads like the library. "Mark as SuperGrafx / HuCard" also moves the game to its tab's folder.
+- **USB stick import and export** (FAT32): import copies `games/`, `saves/`, `bios/` and `patches/` from the stick's `ArchGX` folder (or its top level) and skips what the card already has; export copies `games/` and `saves/` to `ArchGX/` on the stick, ready for another console. Progress bar, space check, and the cart reader is never mistaken for a stick.
+- **Card name:** a card formatted on a computer (no name) is named **RETRONGX** at start-up (new `fat-label` tool; a name you chose is kept).
+- **CD copies:** a disc already in the library is found wherever it is (renamed or moved) and plays straight away. The log line for a named disc no longer repeats the title.
+
 ## GP2-beta9: faster, cancellable CD copies; CD names
 
 From the first real-drive test (Bonk 3 CD, Sapphire and Nexzr copied at about 1.2 MB/s; Nexzr's last 2,489 sectors were unreadable and took about 22 minutes of retries):

@@ -19,9 +19,7 @@ Still to do before GP2 is released:
 
 | Item | Why |
 |---|---|
-| **Hardware test of beta8/beta9** | CD copy speed, cancel, skipping damaged areas, library colours |
-| **USB import and export** | Copy games, saves, BIOS files and patches from a USB stick; export the games and saves folders to one |
-| **Folders** | Make folders and move games into them (one level) |
+| **Hardware test of beta10** | Tabs, Rename on the card, USB import/export, card name |
 | **Patcher** | Apply IPS/BPS patches (hacks, translations) to a game; the result is a new game, the original stays |
 | **Game database submissions** | Guide and GitHub issue form for sharing `gamedb-local.csv` and `cddb-local.csv` entries |
 
@@ -44,6 +42,7 @@ Still to do before GP2 is released:
 | **RetroArch 1.8 or newer: investigate** | Physical CD support arrived in 1.8. Check speed on the Mali driver, the size of porting our patch, and whether **playing straight from the USB CD drive** is practical (seek times, drive noise) |
 | **Beetle PCE Fast from upstream source** | Replace the manufacturer's modified core with one built from public source |
 | **More cart and game data** | Grow the game and CD databases from community submissions ([how to contribute](docs/GAMEDB.md)) |
+| **Play from removable media** | A USB SSD or stick plugged in becomes the library (games played from it, not copied) |
 | **Fully open system image** | Kernel and U-Boot from Rockchip's public sources. Research only: the DDR init blob would still be Rockchip's |
 
 ## Parked (hardware research)
@@ -53,6 +52,8 @@ Still to do before GP2 is released:
 | **HuCard flasher** | Write AM29F080 flash HuCards. Best route: a small RP2350-based USB flasher, not the stock reader |
 | **Cart reader firmware** | Probe the reader's microcontroller (SWD pads) to learn its protocol; the prototype's reader needs recovery |
 | **Upgrade PCB** | Feasibility done: not needed for SuperGrafx or CD |
+| **Our own HuCard reader** | A reader/dumper (and flasher) of our own could also serve RetroPie and MiSTer setups |
+| **Our own emulation machine** | A console of our own design around that reader. Idea only |
 
 ## Not planned
 

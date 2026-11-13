@@ -46,6 +46,9 @@ Insert a HuCard and ArchGX takes over:
 - **Colours in the library:** green = matches the game database, amber ("Modified?") = a known game with a different checksum (a hack, a revision or a bad read: clean the cart and insert it again to check), grey = not in the database.
 - **Bad reads:** a cart that reads differently every time isn't added. Clean its contacts and insert it again.
 - **Debug screen:** hold SELECT for 3 seconds on About.
+- **Tabs:** Left/Right switches between Recent, PC Engine, TurboGrafx-16, SuperGrafx and CD Games. Each is a folder in `games/`; games copied loose into `games/` are sorted at start-up.
+- **Rename** also renames the file (and its saves) on the SD card.
+- **USB stick (FAT32):** when one is plugged into a front port, "USB stick" appears at the top of the library: import games, saves and BIOS files from it, or export your games and saves to an `ArchGX` folder on it.
 
 ArchGX mounts the reader read-only and never sends it commands.
 

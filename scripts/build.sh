@@ -50,6 +50,10 @@ echo "== cd-rip"
 $CC $CFLAGS -o "$OUT/obj/cd-rip" "$TOP/src/cd-rip/cd-rip.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
 $STRIP -o "$PAY/usr/bin/cd-rip" "$OUT/obj/cd-rip"
 
+echo "== fat-label"
+$CC $CFLAGS -o "$OUT/obj/fat-label" "$TOP/src/fat-label/fat-label.c" "$OUT/obj/glibc226_shim.o" -L"$SYSROOT/lib" $LINK
+$STRIP -o "$PAY/usr/bin/fat-label" "$OUT/obj/fat-label"
+
 echo "== RetroArch $RA_TAG + ArchGX patch"
 RA=${RA_SRC:-$OUT/RetroArch}
 if [ -z "${RA_SRC:-}" ]; then

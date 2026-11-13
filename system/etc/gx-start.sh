@@ -244,6 +244,35 @@ title_of() {
 set_title() { printf '%s\t%s\n' "$(basename "$1")" "$2" >> "$TITLES"; }
 
 # FAT-safe file name from a title
+# the library's own folders (also the picker's tabs)
+F_PCE="$GAMES/PC Engine"; F_TG="$GAMES/TurboGrafx-16"; F_SGX="$GAMES/SuperGrafx"; F_CD="$GAMES/CD Games"
+# where a new dump goes: SuperGrafx, TurboGrafx-16 (bit-swapped cart) or PC Engine
+game_folder() {
+	if [ "$1" = sgx ]; then echo "$F_SGX"; elif [ -n "$tg16" ]; then echo "$F_TG"; else echo "$F_PCE"; fi
+}
+# Games dropped loose in games/ (copied from a computer or a USB stick) are
+# moved into the library's folders; folders and files elsewhere stay put.
+sort_root() {
+	sn=0
+	for f in "$GAMES"/*; do
+		[ -e "$f" ] || continue
+		b=$(basename "$f"); dst=""
+		case "$b" in "PC Engine"|"TurboGrafx-16"|SuperGrafx|"CD Games") continue ;; esac
+		if [ -d "$f" ]; then
+			for c in "$f"/*.cue "$f"/*.chd "$f"/*.ccd "$f"/*.m3u; do [ -f "$c" ] && dst=$F_CD; done   # a CD game's folder
+		else
+			case "$b" in
+			*.sgx|*.SGX) dst=$F_SGX ;;
+			*"(USA)"*.pce|*"(U)"*.pce|*"(US)"*.pce|*"(USA)"*.PCE|*"(U)"*.PCE) dst=$F_TG ;;
+			*.pce|*.PCE) dst=$F_PCE ;;
+			*.chd|*.CHD) dst=$F_CD ;;               # one-file CD images (a loose .cue needs its tracks: left alone)
+			esac
+		fi
+		[ -n "$dst" ] && [ ! -e "$dst/$b" ] && mv "$f" "$dst/" && sn=$((sn+1))
+	done
+	[ $sn -gt 0 ] && { sync; log "library: moved $sn game(s) into the system folders"; }
+}
+
 safe_name() { echo "$1" | sed 's#[\\/:*?"<>|]#-#g; s/[. ]*$//'; }
 
 # ------------------------------------------------------- progress screen
@@ -480,7 +509,12 @@ identify() {
 	sc=$(syscard_file "$crc"); [ -z "$sc" ] && [ -n "$crc256" ] && sc=$(syscard_file "$crc256")
 }
 
-normalize() { pce-normalize $TMP/raw.pce $TMP/cart.pce >> "$LOG" 2>&1 || cp $TMP/raw.pce $TMP/cart.pce; }
+# tg16=1 when the cart's data came bit-swapped: a US TurboGrafx-16 HuCard
+normalize() {
+	pce-normalize $TMP/raw.pce $TMP/cart.pce > $TMP/norm.out 2>&1 || cp $TMP/raw.pce $TMP/cart.pce
+	cat $TMP/norm.out >> "$LOG"
+	tg16=""; grep -q "TG16 bit-swapped" $TMP/norm.out && tg16=1
+}
 
 ASK_GAME=""          # a new unknown HuCard: the picker asks how to play it
 
@@ -590,7 +624,8 @@ play_cart() {
 	[ -n "$unstable" ] && log "cart: the reads differed; the majority vote settled every byte"
 	# a copy of this game marked as a bad read is replaced by a good read
 	if [ -z "$game" ] && [ -n "$title" ] && [ $rstate = ok ]; then
-		for f in "$GAMES/$(safe_name "$title").pce" "$GAMES/$(safe_name "$title").sgx"; do
+		for f in "$GAMES"/"$(safe_name "$title")".pce "$GAMES"/"$(safe_name "$title")".sgx \
+		         "$GAMES"/*/"$(safe_name "$title")".pce "$GAMES"/*/"$(safe_name "$title")".sgx; do
 			[ -f "$f" ] || continue
 			case "$(readcheck_of "$f")" in unstable|mismatch)
 				cp $TMP/cart.pce "$f.part" && mv "$f.part" "$f" && sync && {
@@ -601,10 +636,10 @@ play_cart() {
 	new=""
 	if [ -z "$game" ]; then
 		if [ -n "$title" ]; then
-			game="$GAMES/$(safe_name "$title").$ext"
-			[ -e "$game" ] && game="$GAMES/$(safe_name "$title") [$crc].$ext"
+			game="$(game_folder $ext)/$(safe_name "$title").$ext"
+			[ -e "$game" ] && game="$(game_folder $ext)/$(safe_name "$title") [$crc].$ext"
 		else
-			game=$GAMES/cart-$crc.$ext       # the picker offers to name it (Rename)
+			game=$(game_folder $ext)/cart-$crc.$ext       # the picker offers to name it (Rename)
 		fi
 		cp $TMP/cart.pce "$game.part" && mv "$game.part" "$game" && sync ||
 			{ rm -f "$game.part"; show_error "Could not save the game" "Is the SD card full?"; return; }
@@ -646,14 +681,22 @@ cd_title() {
 rip_cd() {
 	status_show "Reading the CD..." "" "-"
 	rm -f $TMP/status.abort
-	out=$(/usr/bin/cd-rip $CD_DEV "$GAMES" $TMP/status 2>> "$LOG"); rc=$?
+	# copied before (maybe renamed or moved since)? play that copy
+	id=$(/usr/bin/cd-rip --id $CD_DEV 2>/dev/null | cut -d' ' -f1)
+	old=""; [ -n "$id" ] && old=$(find "$GAMES" -name "cd-$id.cue" 2>/dev/null | head -1)
+	if [ -n "$old" ]; then
+		log "cd: disc $id is already in the library: $old"
+		status_close; run_game "$old"; return
+	fi
+	mkdir -p "$F_CD"
+	out=$(/usr/bin/cd-rip $CD_DEV "$F_CD" $TMP/status 2>> "$LOG"); rc=$?
 	case $rc in
 	0|4)	cue=$(echo "$out" | tail -1)
 		id=$(basename "$cue" .cue); id=${id#cd-}
 		if ! awk -F '\t' -v f="$(basename "$cue")" '$1 == f { x = 1 } END { exit !x }' "$TITLES" 2>/dev/null; then
 			t=$(cd_title "$id")
 			set_title "$cue" "${t:-Unknown CD ($id)}"     # unknown: Rename gives it a name
-			log "cd: disc $id ${t:+is \"$t\"}${t:-is not in the CD database}"
+			if [ -n "$t" ]; then log "cd: disc $id is \"$t\""; else log "cd: disc $id is not in the CD database"; fi
 		fi
 		log "cd: $cue (cd-rip exit $rc)"
 		if [ $rc = 4 ]; then
@@ -668,12 +711,96 @@ rip_cd() {
 	esac
 }
 
+# USB stick (FAT32) in a front port: "__USB__:import:sdb1" or "__USB__:export:sdb1".
+#  import: games/, saves/, bios/ and patches/ from the stick's ArchGX folder
+#          (or its top level) are copied in; files already on the card are
+#          skipped; loose games are then sorted into the library's folders.
+#  export: games/ and saves/ go to ArchGX/ on the stick (changed files are
+#          copied again), ready to import on another console.
+USB_MNT=$TMP/usb
+usb_copy_list() {        # $1 = source dir, $2 = dest dir, $3 = 1: replace files of another size
+	[ -d "$1" ] || return 0
+	( cd "$1" && find . -type f ! -path "*/.*" ! -path "*System Volume Information*" ) | while read -r f; do
+		f=${f#./}; d="$2/$f"
+		if [ "$2" = "$GAMES" ]; then                  # already in one of the library's folders?
+			bn=$(basename "$f"); hit=""
+			for sd in "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"; do [ -e "$sd/$bn" ] && hit=1; done
+			[ -n "$hit" ] && continue
+		fi
+		if [ -e "$d" ]; then
+			[ "$3" = 1 ] && [ "$(stat -c %s "$1/$f")" != "$(stat -c %s "$d")" ] || continue
+		fi
+		echo "$1/$f	$d"
+	done
+}
+usb_job() {
+	mode=$1; dev=$2
+	status_show "Opening the USB stick..." "" "-"
+	mkdir -p $USB_MNT; umount $USB_MNT 2>/dev/null
+	if ! mount -t vfat -o rw,noatime,shortname=mixed /dev/$dev $USB_MNT 2>> "$LOG"; then
+		log "usb: cannot mount /dev/$dev"
+		show_error "Can't read this USB stick" "Use a stick formatted as FAT32"; return
+	fi
+	list=$TMP/usb.list; : > $list
+	if [ $mode = import ]; then
+		src=$USB_MNT; [ -d "$USB_MNT/ArchGX" ] && src=$USB_MNT/ArchGX
+		usb_copy_list "$src/games" "$GAMES" >> $list
+		usb_copy_list "$src/saves" "$SAVES" >> $list
+		usb_copy_list "$src/bios" "$BIOS_DIR" >> $list
+		usb_copy_list "$src/patches" "$ROM/patches" >> $list
+		dest=/userdata/rom; verb="Importing"
+	else
+		usb_copy_list "$GAMES" "$USB_MNT/ArchGX/games" 1 >> $list
+		usb_copy_list "$SAVES" "$USB_MNT/ArchGX/saves" 1 >> $list
+		dest=$USB_MNT; verb="Exporting"
+	fi
+	n=$(wc -l < $list); total=0
+	while IFS='	' read -r a b; do total=$((total + $(stat -c %s "$a") / 1024 + 1)); done < $list
+	free=$(df -Pk "$dest" | awk 'NR == 2 { print $4 }')
+	log "usb: $mode from/to $dev: $n files, $total KB (free $free KB)"
+	if [ "$n" = 0 ]; then
+		status_show "Nothing new to copy" "The files are already there" "" ""; sleep 3
+	elif [ "$total" -gt "${free:-0}" ]; then
+		show_error "Not enough space" "$((total / 1024)) MB needed, $((free / 1024)) MB free"
+	else
+		done_kb=0; i=0; bad=0
+		while IFS='	' read -r a b; do
+			i=$((i+1))
+			status "$verb $i of $n files..." "$(basename "$a")" $((done_kb * 100 / total)) ""
+			mkdir -p "$(dirname "$b")"
+			cp "$a" "$b.part" && mv "$b.part" "$b" || { rm -f "$b.part"; bad=$((bad+1)); log "usb: could not copy $a"; }
+			done_kb=$((done_kb + $(stat -c %s "$a") / 1024 + 1))
+		done < $list
+		sync
+		[ $mode = import ] && sort_root
+		log "usb: $mode done, $((n - bad)) of $n files copied"
+		if [ $bad -gt 0 ]; then show_error "$bad file(s) could not be copied" "See logs/gx-start.log"
+		else status_show "$verb done: $n file(s)" "$([ $mode = export ] && echo "In the ArchGX folder on the stick. You can remove it now")" "" ""; sleep 3; fi
+	fi
+	sync; umount $USB_MNT 2>/dev/null; rm -f $list
+	status_close
+}
+
 # ---------------------------------------------------------------- main
 mkdir -p $TMP
 [ -x /etc/fix_storage.sh ] && /etc/fix_storage.sh      # our storage-partition fix
-mkdir -p "$GAMES" "$LOGD" "$SAVES" "$BIOS_DIR"
+# A card formatted on a computer has no name: call it RETRONGX, like the
+# console's own format (a name you chose is kept). Done before anything
+# opens a file on the card, with the partition briefly unmounted.
+GB=/dev/block/by-name/gb_rom
+label_msg=""
+if [ -z "$(fat-label $GB 2>/dev/null)" ] && fat-label $GB > /dev/null 2>&1; then
+	sync
+	if umount /userdata/rom 2>/dev/null; then
+		label_msg=$(fat-label --if-empty $GB RETRONGX 2>&1)
+		mount -t vfat -o rw,noatime,nodiratime,norelatime,shortname=mixed,errors=remount-ro $GB /userdata/rom ||
+			{ sleep 1; mount -t vfat -o rw,noatime,nodiratime,norelatime,shortname=mixed,errors=remount-ro $GB /userdata/rom; }
+	fi
+fi
+mkdir -p "$GAMES" "$LOGD" "$SAVES" "$BIOS_DIR" "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"
 [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 262144 ] && mv "$LOG" "$LOG.old"
 log "==== $(cat /etc/archgx-release 2>/dev/null || echo ArchGX) ($(date))"
+[ -n "$label_msg" ] && log "$label_msg"
 
 # Recovery: "reset-retroarch-settings" on the card restores the stock RetroArch settings
 if [ -f "$ROM/reset-retroarch-settings" ]; then
@@ -756,6 +883,7 @@ while :; do
 	if [ -f "$CART_FILE" ]; then export PCE_LAUNCHER_CART=1; else unset PCE_LAUNCHER_CART; fi
 	if [ -n "$ASK_GAME" ]; then export PCE_LAUNCHER_ASK="$ASK_GAME"; ASK_GAME=""; else unset PCE_LAUNCHER_ASK; fi
 	rm -f $TMP/choice
+	sort_root
 	verify_library
 	/usr/bin/pce-launcher "$GAMES" $TMP/choice >> $LOGD/launcher.log 2>&1
 	rc=$?; sync; choice=$(head -1 $TMP/choice 2>/dev/null); how=$(sed -n 2p $TMP/choice 2>/dev/null)
@@ -764,6 +892,7 @@ while :; do
 	0:__RESTART__)    log "restart requested"; sync; reboot; exit 0 ;;
 	0:__RETROARCH__)  run_retroarch_menu; fails=0 ;;
 	0:__RIPCD__)      rip_cd; fails=0 ;;
+	0:__USB__:*)      m=${choice#__USB__:}; usb_job "${m%%:*}" "${m#*:}"; fails=0 ;;
 	0:?*)             run_game "$choice" "$how"; fails=0 ;;
 	*)              fails=$((fails+1)); log "picker exited ($rc)"; ensure_display
 	                [ $fails -ge 5 ] && { log "picker keeps failing, waiting 10 s"; sleep 10; fails=0; } ;;
