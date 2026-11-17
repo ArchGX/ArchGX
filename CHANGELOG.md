@@ -1,5 +1,19 @@
 # Changelog
 
+## GP2: SuperGrafx, CD games, a library with tabs and folders, USB copies
+
+The big one. Everything below was built and tested over 14 betas; the beta entries further down have the details.
+
+- **SuperGrafx games** with their own core (Beetle SuperGrafx, built by ArchGX), recognised automatically.
+- **CD games:** play `.cue`/`.chd` games from the card, and **copy CDs from a USB CD drive** (progress, cancel, damaged areas skipped). A System Card HuCard is saved as the CD BIOS when you insert it.
+- **Library tabs:** Recent, PC Engine, TurboGrafx-16, SuperGrafx, CD Games and **Settings**. Your own **folders** inside a tab, **Move to…**, and **Rename** renames the file and its saves. Games copied anywhere into `games/` are sorted into the right tab, and zip-style CD folders are unwrapped.
+- **USB stick import and export** with pickers (tick games, folders or everything), cancel, and a watchdog that stops a stuck copy.
+- **Better HuCard reads:** a second read checks unknown carts, a third settles any differences byte by byte; flash carts and region-free dumps are turned into the standard ROM; US cards go to TurboGrafx-16. Library colours show verified, modified and unknown dumps.
+- **Readable names on the card:** dumps and copied CDs get their game's name; the card itself is named RETRONGX.
+- **Easier to use:** the library returns to where you left off; hold the d-pad to scroll; composite colours option; autosave every minute.
+- **Bug reports:** one button saves every log in a .zip (to a USB stick or the card); a crash saves one by itself.
+- **Fixes:** non-US HuCards refused in beta10; the library never remembered your place; d-pad repeat on the console's own pads.
+
 ## GP2-beta14: hold to scroll, tidier CD folders
 
 - **Hold the d-pad to scroll:** holding Up or Down repeats after half a second (about 12 rows a second), then speeds up after 2 seconds (about 30 a second). Works in the game library, the USB import/export pickers, Move to…, the menus, the in-game menu and the keyboard (all four directions there). Left/Right in lists stays one step per press, so you don't fly past tabs or out of folders. The old repeat lost track on pads that report the d-pad as axes (the console's own pads), and the USB pickers had none.

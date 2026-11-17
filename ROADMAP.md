@@ -11,22 +11,16 @@ ArchGX aims to be an **easy console**:
 
 The first public build: library, HuCards, the in-game menu with save slots, rewind and options, an installer that patches your own card. See the [Changelog](CHANGELOG.md).
 
-## Now: GP2 (in beta, GP2-beta9)
+## Done: GP2
 
-Done in the betas: SuperGrafx and CD games, System Cards as BIOS, copying CDs from a USB drive, verified HuCard reads and bad-read handling, standard dumps from flash carts, library colours (verified / modified / unknown), composite colours, autosave, dropped-frame logging, a hidden Debug screen. Details in the [Changelog](CHANGELOG.md).
-
-Still to do before GP2 is released:
-
-| Item | Why |
-|---|---|
-| **Hardware test of beta11** | Folders and Move to…, USB pickers, cancel and watchdog, readable names |
-| **Patcher** | Apply IPS/BPS patches (hacks, translations) to a game; the result is a new game, the original stays |
-| **Game database submissions** | Guide and GitHub issue form for sharing `gamedb-local.csv` and `cddb-local.csv` entries |
+SuperGrafx and CD games, copying CDs from a USB drive, library tabs and your own folders, USB import and export, verified HuCard reads, readable names on the card, hold-to-scroll, bug reports. See the [Changelog](CHANGELOG.md).
 
 ## Next (candidates)
 
 | Item | Why |
 |---|---|
+| **Patcher** | Apply IPS/BPS patches (hacks, translations) to a game; the result is a new game, the original stays |
+| **Game database submissions** | Guide and GitHub issue form for sharing `gamedb-local.csv` and `cddb-local.csv` entries |
 | **Website** | Downloads, guide, compatibility list, database submissions (static, GitHub Pages) |
 | **Shadow mask and sharp scaling** | Requested by players; off by default, measured for speed first |
 | **Four players** | Up to 4 pads (2 controller ports + 2 USB) for games like Dungeon Explorer |

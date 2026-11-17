@@ -68,7 +68,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
  * games outside them go to the tab of their kind. Recent: the 5 last played. */
 enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
 static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
-#define ARCHGX_VERSION "GP2-beta14"
+#define ARCHGX_VERSION "GP2"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5

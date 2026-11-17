@@ -16,17 +16,17 @@ The installer never touches:
 
 | Computer | Download |
 |---|---|
-| Windows 10/11 | `ArchGX-Installer-GP1-Windows.exe` |
-| Mac with Apple chip (M1 and later) | `ArchGX-Installer-GP1-macOS-AppleSilicon` |
-| Mac with Intel chip | `ArchGX-Installer-GP1-macOS-Intel` |
-| Linux (x86-64) | `ArchGX-Installer-GP1-Linux` |
+| Windows 10/11 | `ArchGX-Installer-GP2-Windows.exe` |
+| Mac with Apple chip (M1 and later) | `ArchGX-Installer-GP2-macOS-AppleSilicon` |
+| Mac with Intel chip | `ArchGX-Installer-GP2-macOS-Intel` |
+| Linux (x86-64) | `ArchGX-Installer-GP2-Linux` |
 
 **Before you start:** copy anything you care about off the card's large partition (shown as a drive when you plug the card in). The installer leaves it alone, but a backup is always wise.
 
 ## Windows
 
 1. Put the RetroN GX's SD card in your computer's card reader.
-2. Double-click **`ArchGX-Installer-GP1-Windows.exe`**.
+2. Double-click **`ArchGX-Installer-GP2-Windows.exe`**.
    - If Windows says *"Windows protected your PC"*, click **More info**, then **Run anyway**. ArchGX isn't signed with a paid certificate.
    - Allow it to make changes (administrator access is needed to write to the card).
 3. The installer finds the card by itself and checks it. Type **Y** and press Enter.
@@ -39,9 +39,9 @@ The installer never touches:
 
    ```sh
    cd ~/Downloads
-   chmod +x ArchGX-Installer-GP1-macOS-*
-   xattr -d com.apple.quarantine ArchGX-Installer-GP1-macOS-* 2>/dev/null
-   sudo ./ArchGX-Installer-GP1-macOS-AppleSilicon     # or ...-macOS-Intel
+   chmod +x ArchGX-Installer-GP2-macOS-*
+   xattr -d com.apple.quarantine ArchGX-Installer-GP2-macOS-* 2>/dev/null
+   sudo ./ArchGX-Installer-GP2-macOS-AppleSilicon     # or ...-macOS-Intel
    ```
 
    Enter your Mac password when asked.
@@ -51,8 +51,8 @@ The installer never touches:
 ## Linux
 
 ```sh
-chmod +x ArchGX-Installer-GP1-Linux
-sudo ./ArchGX-Installer-GP1-Linux
+chmod +x ArchGX-Installer-GP2-Linux
+sudo ./ArchGX-Installer-GP2-Linux
 ```
 
 Unmount (eject) the card's drive first if your desktop mounted it.
@@ -83,18 +83,18 @@ Put `archgx-stock-rootfs.img` next to the installer, then run it with `--restore
 
 | System | Command |
 |---|---|
-| Windows | Open Command Prompt in the folder, then `ArchGX-Installer-GP1-Windows.exe --restore` |
-| Mac | `sudo ./ArchGX-Installer-GP1-macOS-AppleSilicon --restore` |
-| Linux | `sudo ./ArchGX-Installer-GP1-Linux --restore` |
+| Windows | Open Command Prompt in the folder, then `ArchGX-Installer-GP2-Windows.exe --restore` |
+| Mac | `sudo ./ArchGX-Installer-GP2-macOS-AppleSilicon --restore` |
+| Linux | `sudo ./ArchGX-Installer-GP2-Linux --restore` |
 
 Your games and saves stay on the card; the stock firmware just won't show the ArchGX library.
 
 ## Advanced: the installer script
 
-`archgx-GP1.tar.gz` contains the same installation as a shell script, plus the files it installs. Use it on Linux or WSL, or on card image files:
+`archgx-GP2.tar.gz` contains the same installation as a shell script, plus the files it installs. Use it on Linux or WSL, or on card image files:
 
 ```sh
-tar xzf archgx-GP1.tar.gz && cd archgx-GP1
+tar xzf archgx-GP2.tar.gz && cd archgx-GP2
 sudo ./installer/archgx-install.sh check   /dev/sdX
 sudo ./installer/archgx-install.sh install /dev/sdX            # or a card image file
 sudo ./installer/archgx-install.sh restore /dev/sdX --stock archgx-stock-rootfs.img
