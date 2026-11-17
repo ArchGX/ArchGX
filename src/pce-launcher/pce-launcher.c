@@ -68,7 +68,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
  * games outside them go to the tab of their kind. Recent: the 5 last played. */
 enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
 static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
-#define ARCHGX_VERSION "GP2-beta13"
+#define ARCHGX_VERSION "GP2-beta14"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -1282,6 +1282,8 @@ static int test_action(const char *w)
 static int queue[QMAX], qhead, qtail;
 static void push(int a) { if (a && (qtail + 1) % QMAX != qhead) { queue[qtail] = a; qtail = (qtail + 1) % QMAX; } }
 static int pop(void) { int a; if (qhead == qtail) return A_NONE; a = queue[qhead]; qhead = (qhead + 1) % QMAX; return a; }
+static int rep_dir;                 /* the d-pad direction held (repeat_tick) */
+static int repeat_tick(int lr);
 
 /* ------------------------------------------------------------ keyboard */
 
@@ -1753,7 +1755,7 @@ static int ig_menu(const char *title)
         SDL_Event ev;
         Uint32 now;
         ig_draw(mode, mode == IGM_OPTIONS ? osel : sel, tmode, tsel, cwhat, csel, title, NULL);
-        if (SDL_WaitEventTimeout(&ev, 50)) {
+        if (SDL_WaitEventTimeout(&ev, rep_dir ? 15 : 50)) {
             do {
                 switch (ev.type) {
                 case SDL_QUIT: quit_flag = 1; break;
@@ -1778,8 +1780,8 @@ static int ig_menu(const char *title)
             } while (SDL_PollEvent(&ev));
         }
         now = SDL_GetTicks();
-        if (held && now >= repeat_at) { push(held); repeat_at = now + 120; }
-        if (getenv("PCE_LAUNCHER_SHOT") && qhead == qtail) {   /* test hook: screenshot, exit */
+        repeat_tick(1); (void)held; (void)repeat_at;
+        if (getenv("PCE_LAUNCHER_SHOT") && qhead == qtail && !rep_dir) {   /* test hook: screenshot, exit */
             SDL_Surface *ss;
             ig_draw(mode, mode == IGM_OPTIONS ? osel : sel, tmode, tsel, cwhat, csel, title, NULL);
             ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -2147,6 +2149,41 @@ static int pad_dir(SDL_Joystick *j, int which)      /* 0 up, 1 down, 2 left, 3 r
 
 static int pad_btn(SDL_Joystick *j, int b) { return b >= 0 && SDL_JoystickGetButton(j, b); }
 
+/* Holding the d-pad repeats: the direction actually held is read from every
+ * pad each frame (some pads report the d-pad as a hat, others as axes, and
+ * events alone lose track). First press comes from the event; after 0.45 s
+ * it repeats ~12 a second, after 2 s ~30 a second. lr: Left/Right repeat too
+ * (keyboard, in-game menu); in lists they change tab or folder, so they don't. */
+static Uint32 rep_t0, rep_next;
+static int held_dir(int lr)
+{
+    static const int act[4] = { A_UP, A_DOWN, A_LEFT, A_RIGHT };
+    const char *t = getenv("PCE_LAUNCHER_HOLD");       /* test hook: "down:3000" holds Down 3 s */
+    int i, w;
+    if (t) {
+        int ms = strchr(t, ':') ? atoi(strchr(t, ':') + 1) : 0;
+        if ((int)SDL_GetTicks() < ms) return !strncmp(t, "up", 2) ? A_UP : A_DOWN;
+        return A_NONE;
+    }
+    for (i = 0; i < npads; i++) {
+        SDL_Joystick *j = SDL_JoystickFromInstanceID(pads[i].id);
+        if (!j) continue;
+        for (w = 0; w < (lr ? 4 : 2); w++) if (pad_dir(j, w)) return act[w];
+    }
+    return A_NONE;
+}
+static int repeat_tick(int lr)                   /* 1 when the held direction changed */
+{
+    Uint32 now = SDL_GetTicks();
+    int d = held_dir(lr);
+    if (d != rep_dir) {                       /* pressed, released or changed: start over */
+        if (d && getenv("PCE_LAUNCHER_HOLD") && !rep_dir) push(d);   /* test: the first press */
+        rep_dir = d; rep_t0 = now; rep_next = now + 450; return 1;
+    }
+    if (d && now >= rep_next) { push(d); rep_next = now + (now - rep_t0 > 2000 ? 33 : 80); }
+    return 0;
+}
+
 /* ---------------------------------------------------- USB copy picker */
 /* pce-launcher --pick import|export <root> <out-list>
  * Browse <root> (the USB stick, or games/ for export) and tick what to copy.
@@ -2247,6 +2284,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
             }
         }
         if (quit_flag) _exit(0);
+        repeat_tick(0);
         while ((a = pop()) != A_NONE) {
             const PickEnt *e;
             atroot = !strcmp(cur, root); first = atroot ? 2 : 1; n = npk + first;
@@ -2323,7 +2361,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
         }
         if (!npk) text(f_hint, "Nothing to copy here", dim, W / 2, list_y + row_h * 2, 1);
         text(f_hint, "I  Tick / open folder     SELECT  Tick folder     II  Back     RUN  Copy", dim, W / 2, H * 91 / 100, 1);
-        if (shot && qhead == qtail) {
+        if (shot && qhead == qtail && !rep_dir) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
             if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0) SDL_SaveBMP(ss, shot);
             _exit(3);
@@ -2504,7 +2542,7 @@ int main(int argc, char **argv)
         int a;
 
         /* ---- collect input into the action queue ---- */
-        if (qhead == qtail ? SDL_WaitEventTimeout(&ev, 50) : SDL_PollEvent(&ev)) {
+        if (qhead == qtail ? SDL_WaitEventTimeout(&ev, rep_dir ? 15 : 50) : SDL_PollEvent(&ev)) {
             do {
                 last_event = (sig_atomic_t)ev.type;
                 switch (ev.type) {
@@ -2546,7 +2584,7 @@ int main(int argc, char **argv)
             } while (SDL_PollEvent(&ev));
         }
         now = SDL_GetTicks();
-        if (held && now >= repeat_at) { push(held); repeat_at = now + 90; }
+        if (repeat_tick(mode == M_KEYBOARD)) dirty = 1;
         if (about_sel && mode == M_ABOUT) {        /* SELECT on About: released = close, held 3 s = Debug */
             int k, down = 0;
             for (k = 0; k < npads; k++) {
@@ -3041,7 +3079,7 @@ int main(int argc, char **argv)
             text(f_item, msg, white, px + pw / 2, py + (ph - TTF_FontHeight(f_item)) / 2, 1);
         }
 
-        if (shot && qhead == qtail) {
+        if (shot && qhead == qtail && !rep_dir) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
             if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0)
                 SDL_SaveBMP(ss, shot);

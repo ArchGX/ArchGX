@@ -1,5 +1,9 @@
 # Changelog
 
+## GP2-beta14: hold to scroll
+
+- **Hold the d-pad to scroll:** holding Up or Down repeats after half a second (about 12 rows a second), then speeds up after 2 seconds (about 30 a second). Works in the game library, the USB import/export pickers, Move to…, the menus, the in-game menu and the keyboard (all four directions there). Left/Right in lists stays one step per press, so you don't fly past tabs or out of folders. The old repeat lost track on pads that report the d-pad as axes (the console's own pads), and the USB pickers had none.
+
 ## GP2-beta13: back where you left off, smarter sorting
 
 - **The library remembers your place:** after a game, Controller test, RetroArch (advanced) or a USB copy you're back on the same tab, folder and game. (Earlier betas tried to remember the last game but saved it to a folder that doesn't exist on the console.) A new HuCard dump or CD copy opens on that game's tab. A fresh power-on still opens on Recent.
