@@ -18,17 +18,16 @@ A USB keyboard works too: arrows, Enter, Escape (back), Tab (SELECT).
 
 ## The Game Library
 
-The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z.
+The library lists every game in the card's `games/` folder by name. The five you played most recently come first, marked **Recent**; the rest follow A–Z. SuperGrafx games are marked **SGX** and CD games **CD**.
 
 **Starting a game**
 - If a game has a save, you're asked: **Resume last save**, **Start new game** or **Cancel**. Resume continues from your newest save slot.
-- **SELECT** on a game opens **Rename** and **Delete**.
+- **SELECT** on a game opens its options: **Rename**, **Delete**, and for HuCards **Mark as SuperGrafx** (or back) and **Use as CD System Card**. Use these when a dump wasn't recognised automatically.
 - Rename changes only the name shown. The file and its saves stay matched, and naming an unknown HuCard also records it for the game database (see [GAMEDB.md](GAMEDB.md)).
 
-**Entries at the bottom of the list**
-- **Play the HuCard in the slot**: shown while a cart is inserted.
+**Settings tab** (the last tab; Left from Recent goes straight there)
 - **Controller test**: shows each connected pad. The d-pad, SELECT, RUN, II and I light up when pressed. Hold SELECT + RUN for a second to go back.
-- **About**: ArchGX version, number of games and save states, free space on the card.
+- **About**: ArchGX version, number of games and save states, free space on the card. Holding SELECT on it for 3 seconds opens the Debug screen.
 - **RetroArch (advanced)**: RetroArch's full menu, for advanced settings. Quit RetroArch to come back.
 - **Restart console**.
 
@@ -43,9 +42,31 @@ Insert a HuCard and ArchGX takes over:
 - A cart that's already in the library isn't stored twice.
 - Pulling the cart during a game saves its battery memory and returns to the library.
 - **Unknown carts** (homebrew, repros, prototypes) show as "Unknown HuCard (checksum)". Rename them to give them a name.
-- **Bad reads:** dirty contacts can produce a wrong read, which shows up as an unknown cart. Delete it, clean the cart and reinsert it.
+- **Colours in the library:** green = matches the game database, amber ("Modified?") = a known game with a different checksum (a hack, a revision or a bad read: clean the cart and insert it again to check), grey = not in the database.
+- **Bad reads:** a cart that reads differently every time isn't added. Clean its contacts and insert it again.
+- **Debug screen:** hold SELECT for 3 seconds on About.
+- **Tabs:** Left/Right switches between Recent, PC Engine, TurboGrafx-16, SuperGrafx and CD Games. Each is a folder in `games/`; games copied loose into `games/` are sorted at start-up.
+- **Rename** also renames the file (and its saves) on the SD card.
+- **Folders:** SELECT on a game → Move to… a folder of its tab, the other HuCard tab, or a new folder. I opens a folder, II goes back.
+- **USB stick (FAT32):** when one is plugged into a front port, "USB stick" appears at the top of the library: tick what to import from it, or what to export to an `ArchGX` folder on it (I ticks, RUN copies, II cancels a copy).
 
 ArchGX mounts the reader read-only and never sends it commands.
+
+**SuperGrafx HuCards** (Daimakaimura, Aldynes, Battle Ace, Madou King Granzort, 1941 Counter Attack, Darius Plus) are stored as `<Title>.sgx` and run on the Beetle SuperGrafx core. Copied `.sgx` files work the same way.
+
+**System Cards** are not played: inserting one saves it to `bios/` so CD games can use it (message "System Card saved"). If a card isn't recognised, it shows up as an unknown HuCard: choose **Use as CD System Card** in its options. Its first 256 KB are saved to `bios/` and it leaves the library.
+
+## CD games (beta)
+
+Copy CD games into `games/`, either loose or one folder per game (one folder level is scanned):
+- `.cue` with its `.bin` tracks, `.chd`, or `.ccd` with `.img`/`.sub`;
+- multi-disc games: an `.m3u` playlist listing the discs. Only the playlist is shown.
+
+CD games need a **System Card** image in the card's `bios/` folder. Either insert your System Card (it is saved automatically) or copy a dump named `syscard3.pce` (Super CD-ROM² 3.0), `syscard3u.pce` (TurboGrafx Super System Card), `syscard2.pce`, `syscard2u.pce` or `syscard1.pce`. The best one present is used, in that order. ArchGX doesn't include any BIOS files.
+
+**Copying your own discs:** plug a USB CD drive into a front USB port (use a drive with its own power supply) and insert a disc. **Play the CD in the drive** appears in the library. The first time, the disc is copied to `games/cd-<id>/` with a progress bar (a few minutes), then it starts. After that the same disc plays from the SD card straight away. A copied disc shows as "Unknown CD (id)": use **Rename** to name it. If some sectors can't be read, you're told: clean the disc, delete the copy and copy it again.
+
+Deleting a CD game removes its tracks too, and its folder once empty. Saves, save states and rewind work as for HuCards.
 
 ## The in-game menu
 
@@ -82,7 +103,8 @@ The large partition of the SD card (shown as `RETRONGX` on a PC) holds everythin
 
 | Path | Contents |
 |---|---|
-| `games/` | Your games (`.pce`). Copy your own dumps here from a PC |
+| `games/` | Your games (`.pce`, `.sgx`, `.cue`, `.chd`, `.ccd`, `.m3u`; CD games may sit in one folder each). Copy your own dumps here from a PC |
+| `bios/` | CD System Card images (`syscard3.pce` …) |
 | `saves/` | Battery saves (`.srm`) and save states (`.state1`–`.state4` with `.png` pictures) |
 | `screenshots/` | Screenshots from the in-game menu |
 | `titles.txt` | Names shown in the library (file name, a tab, then the name) |
@@ -99,4 +121,20 @@ The console recovers by itself:
 - if the display system stops, ArchGX restarts it;
 - if that fails, the console reboots.
 
-For a bug report, take the `logs/` folder from the card and open an issue on GitHub.
+### Reporting a bug
+
+1. Go to the **Settings** tab and choose **Save bug report** (or **Export a bug report** in the USB stick menu).
+   - With a USB stick in, `ArchGX-report-001_USB.zip` (then 002, 003…) is saved on the stick.
+   - Without one, `ArchGX-report-001_SD.zip` goes to the `logs/` folder on the SD card.
+2. Open an issue at https://github.com/ArchGX/ArchGX/issues, say what happened, and attach the zip.
+
+The zip holds the logs, a system summary (version, card space, settings, USB devices, kernel messages) and the list of game file names. It never contains games, saves or BIOS files.
+
+If a game fails to start or RetroArch quits with an error, ArchGX saves `logs/last-crash.zip` by itself, so the evidence is there even if you report it later.
+
+### Known issues
+
+- **RetroArch ends every game with exit code 139.** It crashes while closing, after your game is saved. It's harmless and is on the roadmap.
+- **CD copying runs at about 1 MB/s** on the console's USB 2.0 port. A full disc can take 10 minutes or more. Damaged areas are skipped and the copy carries on.
+- **CD games are beta.** Some USB CD drives don't like the large reads; ArchGX slows down automatically when that happens.
+

@@ -36,8 +36,13 @@ payload/usr/lib/retroarch/filters/video/ are built from:
   RetroArch v1.7.4 (commit 02e23be127db29a72170d3c79bfd642288cd15ea)
   https://github.com/libretro/RetroArch
 plus 0001-archgx-retron-gx.patch (included here), with the build recipe in
-retroarch/ and scripts/build.sh of the ArchGX repository. RetroArch is GPL-3.0;
-see THIRD_PARTY.md.
+retroarch/ and scripts/build.sh of the ArchGX repository. RetroArch is GPL-3.0.
+
+The Beetle SuperGrafx core in payload/usr/lib/libretro/ is built, unmodified,
+by scripts/build.sh from:
+  beetle-supergrafx-libretro (commit 9c11dcd213a79d57d2c86313971631af801f2cdc)
+  https://github.com/libretro/beetle-supergrafx-libretro
+It is GPL-2.0; see THIRD_PARTY.md.
 EOF
 ( cd "$DIST" && tar --owner=0 --group=0 -czf "$NAME.tar.gz" "$NAME" )
 

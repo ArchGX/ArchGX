@@ -1,5 +1,136 @@
 # Changelog
 
+## GP2: SuperGrafx, CD games, a library with tabs and folders, USB copies
+
+The big one. Everything below was built and tested over 14 betas; the beta entries further down have the details.
+
+- **SuperGrafx games** with their own core (Beetle SuperGrafx, built by ArchGX), recognised automatically.
+- **CD games:** play `.cue`/`.chd` games from the card, and **copy CDs from a USB CD drive** (progress, cancel, damaged areas skipped). A System Card HuCard is saved as the CD BIOS when you insert it.
+- **Library tabs:** Recent, PC Engine, TurboGrafx-16, SuperGrafx, CD Games and **Settings**. Your own **folders** inside a tab, **Move to…**, and **Rename** renames the file and its saves. Games copied anywhere into `games/` are sorted into the right tab, and zip-style CD folders are unwrapped.
+- **USB stick import and export** with pickers (tick games, folders or everything), cancel, and a watchdog that stops a stuck copy.
+- **Better HuCard reads:** a second read checks unknown carts, a third settles any differences byte by byte; flash carts and region-free dumps are turned into the standard ROM; US cards go to TurboGrafx-16. Library colours show verified, modified and unknown dumps.
+- **Readable names on the card:** dumps and copied CDs get their game's name; the card itself is named RETRONGX.
+- **Easier to use:** the library returns to where you left off; hold the d-pad to scroll; composite colours option; autosave every minute.
+- **Bug reports:** one button saves every log in a .zip (to a USB stick or the card); a crash saves one by itself.
+- **Fixes:** non-US HuCards refused in beta10; the library never remembered your place; d-pad repeat on the console's own pads.
+
+## GP2-beta14: hold to scroll, tidier CD folders
+
+- **Hold the d-pad to scroll:** holding Up or Down repeats after half a second (about 12 rows a second), then speeds up after 2 seconds (about 30 a second). Works in the game library, the USB import/export pickers, Move to…, the menus, the in-game menu and the keyboard (all four directions there). Left/Right in lists stays one step per press, so you don't fly past tabs or out of folders. The old repeat lost track on pads that report the d-pad as axes (the console's own pads), and the USB pickers had none.
+- **Zip-style CD folders unwrapped:** a CD in a folder of the same name (`Strider/Strider/Strider.cue`, as many downloads unpack) is moved up one level at start-up and after an import, so it shows directly in CD Games. Folders with other names are left as they are.
+
+## GP2-beta13: back where you left off, smarter sorting
+
+- **The library remembers your place:** after a game, Controller test, RetroArch (advanced) or a USB copy you're back on the same tab, folder and game. (Earlier betas tried to remember the last game but saved it to a folder that doesn't exist on the console.) A new HuCard dump or CD copy opens on that game's tab. A fresh power-on still opens on Recent.
+- **Games in any folder are sorted:** games copied into `games/` outside the tabs, loose or in folders with any name (an imported `SGX` folder, say), are moved into their tabs: known SuperGrafx games to SuperGrafx, US games to TurboGrafx-16, CDs to CD Games. Folders left empty are removed; other files stay where they are.
+- **Bug report names say where they were saved:** `ArchGX-report-001_USB.zip` or `ArchGX-report-001_SD.zip`.
+
+## GP2-beta12: Settings tab, bug reports
+
+- **Settings tab** after CD Games: Controller test, About, RetroArch (advanced) and Restart console moved here, so the game tabs list only games, your folders and the pinned HuCard / CD / USB entries. Left from Recent wraps to Settings. The Debug screen is still SELECT held on About.
+- **Save bug report** (Settings tab, and "Export a bug report" in the USB menu): every log plus a system summary in one .zip, saved to the USB stick or to `logs/` on the card. No games, saves or BIOS inside. New `zipit` tool writes a .zip any computer opens.
+- **Automatic crash report:** when a game won't start or RetroArch quits with a real error, `logs/last-crash.zip` is saved.
+- **USB pickers:** "Clear all ticks" under Everything.
+- The six tabs are spaced to fit the screen; an empty tab no longer shows a cursor.
+
+## GP2-beta11: folders of your own, Move to…, USB pickers, safer copies
+
+- **Fix:** beta10 refused every HuCard that isn't a US card ("Could not prepare the game").
+- **Your own folders inside a tab:** shown at the top of the tab ("Folder"); I opens one, II goes back. SELECT on a folder renames it or deletes it when empty. The Recent tab has no folders.
+- **Move to…** (SELECT on a game): a folder of the tab, the tab itself, the other HuCard tab (PC Engine ↔ TurboGrafx-16, to fix a game filed in the wrong one) or a **New folder…** named with the keyboard. CDs move with their whole folder.
+- **USB import picker:** browse the stick; I ticks a game or a CD's folder (or opens any other folder), SELECT ticks a whole folder, RUN copies. "Everything" is the first entry. Games land in the right tab.
+- **USB export picker:** the same over your library (tabs and folders kept on the stick); each exported game's saves go with it.
+- **Cancel with II** during import/export: the file in progress is removed, finished files stay.
+- **Watchdog:** a copy that makes no progress for 30 seconds is stopped ("The USB drive stopped responding"); mounting and unmounting a stick also give up after 30 seconds. A pulled or full stick stops the copy at the first error.
+- **Readable names on the card:** at start-up, games still named by code (`cart-e7f8375c.pce`, a CD's `cd-c19b138e` folder) take their library name; saves, recent list and colours follow.
+
+## GP2-beta10: library tabs, Rename renames the file, USB import/export, card name
+
+- **Tabs** (Left/Right): **Recent** (the 5 last played: a quick pick), **PC Engine**, **TurboGrafx-16**, **SuperGrafx**, **CD Games**, each with its game count. Each system tab is a folder in `games/`. New dumps go to the right one: SuperGrafx carts to SuperGrafx, bit-swapped (US) carts to TurboGrafx-16, other HuCards to PC Engine, copied CDs to CD Games. Games left loose in `games/` (copied from a computer or a USB stick) are moved into the folders at start-up; other folders stay where they are.
+- **Pinned entries:** "Play the HuCard in the slot", "Play the CD in the drive" and "USB stick" are at the top of every tab, when there is something to play or copy.
+- **Rename renames the file:** a HuCard's file and its saves get the new name (`cart-7ee8cdcd.pce` → `Neutopia II.pce`); a CD's folder is renamed (its tracks keep their names). The SD card now reads like the library. "Mark as SuperGrafx / HuCard" also moves the game to its tab's folder.
+- **USB stick import and export** (FAT32): import copies `games/`, `saves/`, `bios/` and `patches/` from the stick's `ArchGX` folder (or its top level) and skips what the card already has; export copies `games/` and `saves/` to `ArchGX/` on the stick, ready for another console. Progress bar, space check, and the cart reader is never mistaken for a stick.
+- **Card name:** a card formatted on a computer (no name) is named **RETRONGX** at start-up (new `fat-label` tool; a name you chose is kept).
+- **CD copies:** a disc already in the library is found wherever it is (renamed or moved) and plays straight away. The log line for a named disc no longer repeats the title.
+
+## GP2-beta9: faster, cancellable CD copies; CD names
+
+From the first real-drive test (Bonk 3 CD, Sapphire and Nexzr copied at about 1.2 MB/s; Nexzr's last 2,489 sectors were unreadable and took about 22 minutes of retries):
+- **Cancel a CD copy with II.** The partial copy is deleted.
+- **Damaged areas are skipped.** After 16 bad sectors in a row, only one sector per second of audio is tried, once, until reads work again ("skipping a damaged area..."). Nexzr's damaged edge would now take seconds.
+- **Bigger reads:** 48 sectors per request instead of 16 (halved automatically if a drive refuses them).
+- **CD names:** a copied disc is named from `cddb.csv` by its disc id. Renaming a CD on the console adds it to `cddb-local.csv`, ready to share like `gamedb-local.csv`.
+
+## GP2-beta8: verified library, flash-cart dumps, autosave, Debug screen
+
+- **Unreadable carts aren't added.** If some bytes differ in all three reads, the game isn't saved: "Couldn't get a clean read of this HuCard". If the vote settles every byte, the read is used.
+- **Library colours:** green = matches the game database, amber + "Modified?" = a known title with a different checksum (hack, revision or bad read), grey = not in the database (homebrew, CD games). Games copied from a computer are checked once, in the menu (`read-check.txt` now stores each HuCard's checksum).
+- **Standard dumps from flash carts and odd sizes:** huconv.py's 384 KB layout is rebuilt; a known game inside a bigger read (768 KB Darius Plus read as 1 MB, flash-cart leftovers) is trimmed; a region-free patch is undone. The saved file is the standard ROM.
+- **Same game, no duplicate:** a dump matches library files with a 512-byte copier header, and files one folder down.
+- **Database:** Darius Plus header (it was named Darius Alpha); Dai Makaimura Improvement Hack (SuperGrafx), Darius Alpha/Plus SG Enhanced, Die Hard (English), Dinoforce, Gunhed variants.
+- **Autosave every minute** (CD backup RAM) and a flush to the card while a game runs: switching off loses at most a minute.
+- **Dropped frames** logged after every game in `gx-start.log` and `logs/last-session.txt`.
+- **Debug screen** (hold SELECT for 3 s on About): FPS counter, checksums in the library, read every HuCard twice, pause the USB log during games (on by default), hardware status, last game's frames and how it closed.
+
+## GP2-beta7: bad-read indicator
+
+- A cart read is checked two ways: **unstable** (two reads differed; settled by majority vote) and **mismatch** (the header names a known game but the checksum isn't that game's, so the read is probably damaged).
+- Either one shows a red message before the game starts and marks the game **Bad read?** in the library (red, with a hint to clean the HuCard and insert it again). Recorded in `read-check.txt` on the card.
+- Inserting the same cart again and getting a good read replaces the bad copy and clears the mark. Saves stay, because the file name doesn't change.
+
+## GP2-beta6: reliable cart reads, easier SuperGrafx, composite colours
+
+From the GP2-beta4 hardware test:
+- **Bad reads found:** the SuperGrafx carts that went to a white screen were damaged reads, not an emulation problem. Two reads of Aldynes gave two different checksums; the Daimakaimura read had 358 wrong bytes (bits 0x20/0x60 flipped) and still ran. The unrecognised System Cards were bad reads too (headers like `3838383822222222`).
+- **Verified reads:** a cart that isn't an exact database match is read a second time. If the two reads differ, a third read settles every byte by majority vote (`pce-normalize --vote`) and the console says the cart reads unreliably (clean the contacts). Exact matches still start straight away.
+- **SuperGrafx by name:** a cart identified by its header as a "(Super Grafx)" title is now filed as `.sgx` even when its checksum doesn't match.
+- **New HuCard chooser:** an unknown cart now asks how to run it: Play as PC Engine / Play as SuperGrafx / Use as CD System Card / Not now. No more black screen, quit, SELECT, change.
+- **Cart reader warning:** only for the cart reader, and only after it has been missing for 30 seconds in a row (it disconnects briefly at every cart change). The USB ports are shown in About only.
+- **Composite colours** (Options): the composite-video palette of both cores (`pce_fast_palette` / `sgx_palette`), applied live.
+- **Performance:** RetroArch's own frame-by-frame rewind (on in the stock config: a save state every 10 frames into a 20 MB buffer) is switched off. ArchGX's rewind is unaffected. This should reduce the CD skips (2.6 % dropped frames in Rondo of Blood and Lords of Thunder).
+
+## GP2-beta5: copy CDs from a USB CD drive
+
+- New `cd-rip`: with a USB CD drive in a front port and a disc inserted, **Play the CD in the drive** appears in the library. The first time it copies the disc to `games/cd-<id>/` (one `.bin` per track plus a `.cue`, raw 2352-byte sectors), with a progress bar showing the track, speed and time left, then plays it. A disc copied before is recognised by its table of contents and plays straight away.
+- Bad reads are retried (chunk twice, then sector by sector three times); unreadable sectors are zero-filled and reported. Drives that refuse raw data reads fall back to 2048-byte data sectors. Copying happens in a hidden folder, so an interrupted copy never shows up in the library. Free space is checked first.
+- Copied discs are named "Unknown CD (id)"; Rename starts with an empty name for any "Unknown ..." game.
+
+## GP2-beta4: hardware check on screen
+
+- 20 seconds after power-on, the library checks for the cart reader (2e25:988c) and the front USB ports (hub 1a40:0101) every 2 seconds. If one is missing, a red line under the list says so ("Cart reader not found: HuCards and the controller ports won't work", "Front USB ports not found", or "Cart reader is in update mode: restart the console"). It clears by itself when the device comes back.
+- About shows "Cart reader: OK / not found" and "Front USB ports: OK / not found". The result also goes to `logs/launcher.log`.
+
+## GP2-beta3: USB event log (hardware work)
+
+- `logs/usb.log` lists the USB devices present at start-up, then every device that appears (+) or disappears (−), with its ID, speed and name. Read-only: nothing is sent to any device.
+- Game database: header signatures for 1941 Counter Attack, Aldynes and Daimakaimura.
+
+## GP2-beta2: game options for SuperGrafx and System Card dumps
+
+Hardware test of GP2-beta1: SuperGrafx games and a CD game (Sylphia, .cue) ran at full speed. System Card and SuperGrafx carts were dumped as unknown HuCards, because the reader dumps 1 MB whatever the card holds.
+
+- **Game options (SELECT):** **Mark as SuperGrafx** / **Mark as HuCard** changes only the file extension, so saves, title and recent order stay. **Use as CD System Card** saves the first 256 KB to `bios/` (named after the card when its checksum is known, else `syscard3.pce`) and removes the dump from the library.
+- **Better detection:** cart dumps are also checked by the checksum of their first 256 KB and 512 KB, so oversized System Card and SuperGrafx dumps are recognised. Both checksums are logged to help grow the database.
+- Footer hint now reads "SELECT  Game options".
+
+## GP2-beta1: SuperGrafx and CD games (beta)
+
+**New**
+- **SuperGrafx:** ArchGX now ships Beetle SuperGrafx, built from upstream source. SuperGrafx games (`.sgx`, or a known SuperGrafx HuCard by checksum) run on it; everything else stays on the stock core. SuperGrafx HuCards dumped in the slot are stored as `.sgx`. "Reduce flicker" also applies to this core.
+- **CD games:** `.cue`/`.bin`, `.chd`, `.ccd` and `.m3u` (multi-disc) in `games/`, loose or one folder per game. Tracks and discs named by a playlist are hidden; a folder holding one game shows the folder name.
+- **System Card as BIOS:** inserting a System Card saves it to `bios/` instead of playing it. CD games pick the best System Card present (3.0 > US 3.0 > 2.x > US 2.0 > 1.0); without one a clear message says what to do.
+- Library markers **SGX** and **CD**. Deleting a CD game removes its tracks and empty folder.
+
+**Under the hood**
+- glibc 2.26 shim: `fstatat64`, `arc4random*`, `__libc_single_threaded`, `__ioctl_time64` (needed by the new core).
+- The startup log shows the installed build from `/etc/archgx-release`.
+
+**Known issues / to check on hardware**
+- CD speed on the Cortex-A7, especially `.chd` (decompressed on the fly).
+- SuperGrafx speed (two video chips: heavier than PCE).
+- Arcade Card games are not supported by the stock core.
+- The System Card checksums for 1.0/2.0/2.1 come from the game database and are not yet confirmed with real cards.
+
 ## GP1: first public build
 
 **Install**

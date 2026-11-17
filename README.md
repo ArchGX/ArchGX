@@ -11,20 +11,28 @@ ArchGX replaces the RetroN GX's game launcher, menus and HuCard handling with op
 
 It is installed by a script that patches **your own** SD card. ArchGX doesn't contain or distribute any Hyperkin or Rockchip files.
 
-> **Status: GP1, the first public build.** It has been tested on one console with many HuCards and SD-card games, and every report helps. Read [Install](docs/INSTALL.md) first, and **back up your card**.
+> **Status: GP2.** Tested on one console with many HuCards, CDs and SD-card games, and every report helps (Settings → Save bug report). Read [Install](docs/INSTALL.md) first, and **back up your card**.
 
 ![ArchGX screens](screenshots/overview.png)
 
 ## Features
 
 **Library**
-- Every game you've played or copied to the card, by name, with the last five played at the top.
-- Rename and delete games.
+- Tabs: Recent, PC Engine, TurboGrafx-16, SuperGrafx, CD Games and Settings.
+- Your own folders inside a tab; rename, move and delete games.
+- Games copied to the card are sorted into the right tab; the library comes back to where you left off.
 
 **HuCards**
-- Insert a cart and it's read, cleaned up, identified and played.
-- Unknown carts (homebrew, repros) work too; name them on the console.
+- Insert a cart and it's read, checked, identified and played; US cards go to TurboGrafx-16.
+- Unknown carts (homebrew, repros, flash carts) work too; name them on the console.
 - Each cart is kept in the library, so it's only read once.
+
+**SuperGrafx and CD games**
+- SuperGrafx games on their own core, recognised automatically.
+- CD games from the card, or copy a disc from a USB CD drive. A System Card HuCard becomes the CD BIOS.
+
+**USB stick**
+- Import and export games and saves: pick games, folders or everything.
 
 **In-game menu** (hold RUN + SELECT)
 - Resume, Save and Load State (4 slots with pictures), Rewind, Screenshot, Options, Restart, RetroArch Menu, Quit.
@@ -43,6 +51,7 @@ It is installed by a script that patches **your own** SD card. ArchGX doesn't co
 
 **Extras**
 - Controller test.
+- One-button bug report: every log in one .zip, on a USB stick or the SD card.
 - About screen.
 - Progress screens while a cart is read.
 - Automatic recovery if the display system crashes.

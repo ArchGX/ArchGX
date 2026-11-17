@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <time.h>
 
 #define MAX_GAMES 4096
@@ -49,21 +50,40 @@
 #define BG_PATH "/usr/share/archgx/background.png"
 #endif
 #ifndef LAST_FILE
-#define LAST_FILE "/tmp/library/last.txt"
+#define LAST_FILE "/tmp/gx/library-pos.txt"   /* RAM: a fresh power-on starts on Recent */
 #endif
 
 /* ------------------------------------------------------------------ data */
 
-typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; } Game;
-#define ARCHGX_VERSION "GP1"
+enum { K_HUCARD, K_SGX, K_CD, K_DIR };      /* K_DIR: a folder of your own inside a tab */
+/* check: from read-check.txt. C_NONE (CD games, not checked yet) and
+ * C_UNKNOWN show grey, C_OK (matches the game database) green, C_MOD (known
+ * title, other checksum: hack, revision or bad read) amber */
+enum { C_NONE, C_UNKNOWN, C_OK, C_MOD };
+typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int recent; int kind; int check; char crc[9]; int tab;
+                 char folder[64];   /* the folder of your own it is in ("" = the tab itself) */
+                 int infold; } Game;  /* 1: the game has a folder to itself (a CD) */
+
+/* Library tabs (Left/Right). Each system tab is also a folder in games/;
+ * games outside them go to the tab of their kind. Recent: the 5 last played. */
+enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
+static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
+#define ARCHGX_VERSION "GP2"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
 
 static Game games[MAX_GAMES];
 static int ngames;          /* list entries, including the restart entry */
-static int nreal;           /* actual games */
-static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512];
+static int nreal;           /* actual games (in this tab), after the pinned entries */
+static int npin;            /* pinned entries at the top: USB stick, CD in the drive, HuCard in the slot */
+static int ntotal;          /* games in all tabs */
+static int cur_tab = -1, tab_count[T_N];
+static char cur_folder[64];    /* the folder of your own being shown ("" = the tab) */
+static char scan_folder[64];   /* while scanning: the folder of your own being scanned */
+static int scan_depth;
+#define REAL(i) ((i) >= npin && (i) < npin + nreal)
+static char lib_dir[512], data_dir[512], titles_path[512], localdb_path[512], recent_path[512], bios_dir[512], readcheck_path[512];
 
 /* ------------------------------------------------------------- titles */
 /* titles.txt: "file<TAB>title" lines; the last entry for a file wins.
@@ -105,7 +125,8 @@ static int has_state(const char *path)
 {
     const char *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
     char p[1024];
-    int n = (int)strlen(file) - 4, i;
+    const char *dot = strrchr(file, '.');
+    int n = dot ? (int)(dot - file) : (int)strlen(file), i;
     if (n <= 0) return 0;
     for (i = -1; i <= 9; i++) {
         if (i < 0) snprintf(p, sizeof p, "%s/%.*s.state", saves_dir, n, file);
@@ -127,17 +148,239 @@ static int cart_crc(const char *file, char crc[9])
 static volatile sig_atomic_t quit_flag;
 static volatile sig_atomic_t last_event;
 
-static int has_pce_ext(const char *n)
+static int has_ext(const char *n, const char *ext)
 {
-    size_t l = strlen(n);
-    return l > 4 && strcasecmp(n + l - 4, ".pce") == 0;
+    size_t l = strlen(n), e = strlen(ext);
+    return l > e && strcasecmp(n + l - e, ext) == 0;
 }
 
-/* recently played games first (newest first), then the rest A-Z */
+/* library files: HuCards, SuperGrafx and CD images (-1: not a game) */
+static int game_kind(const char *n)
+{
+    if (has_ext(n, ".pce")) return K_HUCARD;
+    if (has_ext(n, ".sgx")) return K_SGX;
+    if (has_ext(n, ".cue") || has_ext(n, ".chd") || has_ext(n, ".ccd") || has_ext(n, ".m3u")) return K_CD;
+    return -1;
+}
+
+/* file names a .cue (FILE "x" ...) or .m3u (one per line) refers to; calls
+ * fn(dir, name, arg) for each. Returns the number found. */
+static int each_ref(const char *dir, const char *file, void (*fn)(const char *, const char *, void *), void *arg)
+{
+    char p[1024], line[1024];
+    int n = 0, m3u = has_ext(file, ".m3u");
+    FILE *f;
+    snprintf(p, sizeof p, "%s/%s", dir, file);
+    if (!(f = fopen(p, "r"))) return 0;
+    while (fgets(line, sizeof line, f)) {
+        char *a = line, *b;
+        line[strcspn(line, "\r\n")] = '\0';
+        while (*a == ' ' || *a == '\t') a++;
+        if (m3u) {
+            if (!*a || *a == '#') continue;
+        } else {
+            if (strncasecmp(a, "FILE", 4) || (a[4] != ' ' && a[4] != '\t')) continue;
+            a += 5; while (*a == ' ' || *a == '\t') a++;
+            if (*a == '"') { a++; if (!(b = strchr(a, '"'))) continue; *b = '\0'; }
+            else if ((b = strpbrk(a, " \t"))) *b = '\0';
+        }
+        if (strchr(a, '/') || strchr(a, '\\') || !*a) continue;   /* same folder only */
+        fn(dir, a, arg); n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* read-check.txt (written by gx-start): "file<TAB>state<TAB>crc32", last line
+ * wins. state: ok / mismatch / unknown (beta7 also wrote "unstable") */
+static int read_check(const char *file, char *crc)
+{
+    char line[600], *st, *c;
+    int r = C_NONE;
+    size_t n = strlen(file);
+    FILE *f = fopen(readcheck_path, "r");
+    crc[0] = 0;
+    if (!f) return C_NONE;
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, file, n) || line[n] != '\t') continue;
+        st = line + n + 1;
+        c = strchr(st, '\t');
+        r = !strncmp(st, "ok", 2) ? C_OK : !strncmp(st, "unknown", 7) ? C_UNKNOWN : C_MOD;
+        crc[0] = 0;
+        if (c) { snprintf(crc, 9, "%.8s", c + 1); if (strlen(crc) < 8) crc[0] = 0; }
+        else if (r == C_OK) r = C_NONE;          /* beta7 "ok" line: checked again by gx-start */
+    }
+    fclose(f);
+    return r;
+}
+
+/* debug.cfg (Debug screen, hidden: hold SELECT on About) */
+enum { D_FPS, D_CRC, D_TWICE, D_USBPAUSE, D_N };
+static const char *dbg_key[D_N] = { "fps", "crc", "readtwice", "usbpause" };
+static const char *dbg_name[D_N] = { "FPS counter in games", "Checksums in the library", "Read every HuCard twice", "Pause the USB log during games" };
+static int dbg_val[D_N] = { 0, 0, 0, 1 };
+static char debug_path[512];
+static void debug_load(void)
+{
+    char line[200];
+    int i;
+    FILE *f = fopen(debug_path, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f))
+        for (i = 0; i < D_N; i++) {
+            size_t k = strlen(dbg_key[i]);
+            if (!strncmp(line, dbg_key[i], k) && line[k] == '=') dbg_val[i] = atoi(line + k + 1) ? 1 : 0;
+        }
+    fclose(f);
+}
+static void debug_save(void)
+{
+    char tmp[600];
+    int i;
+    FILE *f;
+    snprintf(tmp, sizeof tmp, "%s.new", debug_path);
+    if (!(f = fopen(tmp, "w"))) return;
+    fprintf(f, "# ArchGX debug options (Debug screen)\n");
+    for (i = 0; i < D_N; i++) fprintf(f, "%s=%d\n", dbg_key[i], dbg_val[i]);
+    if (fclose(f) == 0) rename(tmp, debug_path);
+}
+
+static int recent_rank(const char *file);
+/* the stock folder a path is in (games/<tab name>/...), else 0 */
+static int stock_tab(const char *dir)
+{
+    size_t n = strlen(lib_dir), k;
+    int t;
+    if (strncmp(dir, lib_dir, n) || dir[n] != '/') return 0;
+    for (t = T_PCE; t < T_SET; t++) {
+        k = strlen(tab_name[t]);
+        if (!strncmp(dir + n + 1, tab_name[t], k) && (dir[n + 1 + k] == '/' || !dir[n + 1 + k])) return t;
+    }
+    return 0;
+}
+static int is_stock_dir(const char *dir)
+{
+    int t = stock_tab(dir);
+    return t && !strchr(dir + strlen(lib_dir) + 1, '/');
+}
+static void add_game(const char *dir, const char *name, int kind)
+{
+    size_t nl = strlen(name);
+    const char *t = title_for(name);
+    char crc[9], *p, *lab = NULL;
+    if (ngames >= MAX_GAMES - 8) return;
+    if (!(p = malloc(strlen(dir) + nl + 2))) return;
+    sprintf(p, "%s/%s", dir, name);
+    if (t) lab = strdup(t);
+    else if (cart_crc(name, crc)) {
+        if ((lab = malloc(32))) snprintf(lab, 32, "Unknown HuCard (%s)", crc);
+    } else if ((lab = strdup(name))) {
+        char *dot = strrchr(lab, '.');
+        if (dot && dot != lab) *dot = '\0';
+    }
+    if (!lab) { free(p); return; }
+    games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL; games[ngames].kind = K_HUCARD; games[ngames].check = C_NONE; games[ngames].crc[0] = 0;
+    games[ngames].recent = recent_rank(name); games[ngames].kind = kind;
+    games[ngames].check = kind == K_CD ? C_NONE : read_check(name, games[ngames].crc);
+    snprintf(games[ngames].folder, sizeof games[ngames].folder, "%s", scan_folder);
+    games[ngames].infold = scan_depth;
+    games[ngames].tab = stock_tab(dir);
+    if (!games[ngames].tab) games[ngames].tab = kind == K_SGX ? T_SGX : kind == K_CD ? T_CD : T_PCE;
+    ngames++;
+}
+
+/* names referred to by a .m3u/.cue in the same folder are not listed */
+#define MAX_HIDE 256
+static char *hide[MAX_HIDE];
+static int nhide;
+static void hide_ref(const char *dir, const char *name, void *arg)
+{
+    (void)dir; (void)arg;
+    if (nhide < MAX_HIDE) hide[nhide++] = strdup(name);
+}
+static int hidden(const char *name)
+{
+    int i;
+    for (i = 0; i < nhide; i++) if (hide[i] && !strcasecmp(hide[i], name)) return 1;
+    return 0;
+}
+
+/* a folder holding a disc image directly: a CD game's own folder */
+static int has_disc(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int r = 0;
+    if (!d) return 0;
+    while (!r && (e = readdir(d)))
+        r = has_ext(e->d_name, ".cue") || has_ext(e->d_name, ".chd") || has_ext(e->d_name, ".ccd") || has_ext(e->d_name, ".m3u");
+    closedir(d);
+    return r;
+}
+
+/* one folder: its games, minus discs that a playlist (.m3u) already lists */
+static void scan_dir(const char *dir, int depth)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    if (!d) return;
+    while (nhide) free(hide[--nhide]);
+    while ((e = readdir(d)))
+        if (e->d_name[0] != '.' && has_ext(e->d_name, ".m3u")) each_ref(dir, e->d_name, hide_ref, NULL);
+    rewinddir(d);
+    while ((e = readdir(d)) && ngames < MAX_GAMES - 8) {
+        int k;
+        struct stat st;
+        char p[1024];
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (depth == 0 && stat(p, &st) == 0 && S_ISDIR(st.st_mode)) continue;   /* folders: second pass */
+        if ((k = game_kind(e->d_name)) < 0 || hidden(e->d_name)) continue;
+        add_game(dir, e->d_name, k);
+    }
+    if (depth == 0) {                       /* one level of game folders (CD games) */
+        rewinddir(d);
+        while ((e = readdir(d)) && ngames < MAX_GAMES - 8) {
+            struct stat st;
+            char p[1024];
+            if (e->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+            if (is_stock_dir(p)) continue;               /* scanned on their own */
+            if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) {
+                int before = ngames;
+                const char *f;
+                if (is_stock_dir(dir) && !has_disc(p) && ngames < MAX_GAMES - 8) {
+                    /* a folder of your own inside a tab: an entry to open, then its games */
+                    games[ngames].path = strdup(p); games[ngames].label = strdup(e->d_name);
+                    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_DIR;
+                    games[ngames].check = C_NONE; games[ngames].crc[0] = 0; games[ngames].tab = stock_tab(dir);
+                    games[ngames].folder[0] = 0; games[ngames].infold = 0;
+                    if (games[ngames].path && games[ngames].label) ngames++;
+                    snprintf(scan_folder, sizeof scan_folder, "%s", e->d_name);
+                    scan_dir(p, 0);
+                    scan_folder[0] = 0;
+                    continue;
+                }
+                scan_depth = 1;
+                scan_dir(p, 1);
+                scan_depth = 0;
+                /* a folder holding one game: show the folder's name (unless retitled) */
+                if (ngames == before + 1 && (f = strrchr(games[before].path, '/')) && !title_for(f + 1)) {
+                    char *lab = strdup(e->d_name);
+                    if (lab) { free(games[before].label); games[before].label = lab; }
+                }
+            }
+        }
+    }
+    closedir(d);
+}
+
+/* Recent tab: newest first; system tabs: your folders, then games, A-Z */
 static int cmp_games(const void *a, const void *b)
 {
     const Game *x = (const Game *)a, *y = (const Game *)b;
-    if (x->recent || y->recent) {
+    if ((x->kind == K_DIR) != (y->kind == K_DIR)) return x->kind == K_DIR ? -1 : 1;
+    if (cur_tab == T_RECENT) {
         if (!x->recent) return 1;
         if (!y->recent) return -1;
         return x->recent - y->recent;
@@ -171,71 +414,125 @@ static void free_games(void)
     ngames = nreal = 0;
 }
 
+/* a disc in a USB CD drive (/dev/sr0)? */
+#include <limits.h>
+#include <linux/cdrom.h>
+static int cd_present;
+static int cd_check(void)
+{
+    const char *dev = getenv("PCE_LAUNCHER_CD") ? getenv("PCE_LAUNCHER_CD") : "/dev/sr0";   /* test hook */
+    int fd = open(dev, O_RDONLY | O_NONBLOCK), now;
+    if (fd < 0) now = 0;
+    else {
+        now = getenv("PCE_LAUNCHER_CD") ? 1 : ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK;
+        close(fd);
+    }
+    if (now == cd_present) return 0;
+    cd_present = now;
+    SDL_Log("cd drive: %s", now ? "disc inserted" : "no disc");
+    return 1;
+}
+
+static void special(const char *path, const char *label)
+{
+    games[ngames].path = strdup(path); games[ngames].label = strdup(label);
+    games[ngames].tex = NULL; games[ngames].recent = 0; games[ngames].kind = K_HUCARD;
+    games[ngames].check = C_NONE; games[ngames].crc[0] = 0; games[ngames].tab = 0;
+    ngames++;
+}
+
+static char usb_dev[32];    /* a USB stick's partition (sdb1...), "" if none */
+
 static void scan_library(void)
 {
-    DIR *d = opendir(lib_dir);
-    struct dirent *e;
+    int i, k, np;
+    char p[1024];
     free_games();
     load_titles();
-    if (d) {
-        while ((e = readdir(d)) && ngames < MAX_GAMES - 1) {
-            size_t nl = strlen(e->d_name);
-            char *p, *lab;
-            if (e->d_name[0] == '.' || !has_pce_ext(e->d_name)) continue;
-            p = malloc(strlen(lib_dir) + nl + 2);
-            lab = malloc(nl + 1);
-            if (!p || !lab) { free(p); free(lab); break; }
-            sprintf(p, "%s/%s", lib_dir, e->d_name);
-            {
-                const char *t = title_for(e->d_name);
-                char crc[9];
-                free(lab);
-                if (t) lab = strdup(t);
-                else if (cart_crc(e->d_name, crc)) {
-                    lab = malloc(32);
-                    if (lab) snprintf(lab, 32, "Unknown HuCard (%s)", crc);
-                } else {
-                    lab = malloc(nl + 1);
-                    if (lab) { memcpy(lab, e->d_name, nl - 4); lab[nl - 4] = '\0'; }
-                }
-                if (!lab) { free(p); break; }
+    scan_dir(lib_dir, 0);
+    for (k = T_PCE; k < T_SET; k++) { snprintf(p, sizeof p, "%s/%s", lib_dir, tab_name[k]); scan_dir(p, 0); }
+    ntotal = ngames;
+    memset(tab_count, 0, sizeof tab_count);
+    for (i = 0; i < ngames; i++) {
+        if (games[i].kind == K_DIR) continue;
+        tab_count[games[i].tab]++;
+        if (games[i].recent) tab_count[T_RECENT]++;
+    }
+    for (i = 0; i < ngames; i++) if (games[i].kind == K_DIR) ntotal--;
+    if (cur_tab < 0) {                              /* first time: Recent, else the first tab with games */
+        cur_tab = T_RECENT;
+        if (!tab_count[T_RECENT]) for (cur_tab = T_PCE; cur_tab < T_CD && !tab_count[cur_tab]; cur_tab++) ;
+        if (!tab_count[cur_tab]) cur_tab = T_PCE;
+    }
+    for (i = k = 0; i < ngames; i++) {              /* keep this tab's games */
+        if (cur_tab == T_SET) ;                     /* Settings: no games */
+        else if (cur_tab == T_RECENT ? games[i].recent > 0 && games[i].kind != K_DIR
+                                : games[i].tab == cur_tab && !strcmp(games[i].folder, cur_folder)) { games[k++] = games[i]; continue; }
+        free(games[i].path); free(games[i].label);
+        if (games[i].tex) SDL_DestroyTexture(games[i].tex);
+    }
+    ngames = nreal = k;
+    qsort(games, ngames, sizeof(Game), cmp_games);
+    /* pinned entries first, in every tab */
+    if (cur_tab == T_SET) {                         /* Settings: the utilities only */
+        npin = 0;
+        special("__PADTEST__", "Controller test");
+        special("__ABOUT__", "About");
+        special("__REPORT__", "Save bug report");
+        special("__RETROARCH__", "RetroArch (advanced)");
+        special("__RESTART__", "Restart console");
+        return;
+    }
+    np = (usb_dev[0] != 0) + (cd_present != 0) + (getenv("PCE_LAUNCHER_CART") != NULL);
+    memmove(games + np, games, sizeof(Game) * ngames);
+    k = ngames; ngames = 0;
+    if (getenv("PCE_LAUNCHER_CART")) special("__CART__", "Play the HuCard in the slot");
+    if (cd_present) special("__RIPCD__", "Play the CD in the drive");
+    if (usb_dev[0]) special("__USB__", "USB stick: import or export games");
+    npin = ngames; ngames = npin + k;
+}
+
+/* a USB stick in a front port: the first sd* disk that isn't the cart reader
+ * (2e25:xxxx) and holds media; its first partition when it has one */
+static int usb_check(void)
+{
+    char now[32] = "", p[600], real[PATH_MAX], *q;
+    DIR *d;
+    struct dirent *e;
+    if (getenv("PCE_LAUNCHER_USBSTICK")) snprintf(now, sizeof now, "%s", getenv("PCE_LAUNCHER_USBSTICK"));   /* test hook */
+    else if ((d = opendir("/sys/block"))) {
+        while (!now[0] && (e = readdir(d))) {
+            FILE *f;
+            long long size = 0;
+            int reader = 0;
+            if (strncmp(e->d_name, "sd", 2)) continue;
+            snprintf(p, sizeof p, "/sys/block/%s/size", e->d_name);
+            if ((f = fopen(p, "r"))) { if (fscanf(f, "%lld", &size) != 1) size = 0; fclose(f); }
+            if (size <= 0) continue;                        /* an empty card slot */
+            snprintf(p, sizeof p, "/sys/block/%s/device", e->d_name);
+            if (!realpath(p, real)) continue;
+            while ((q = strrchr(real, '/')) && q != real) {   /* walk up to the USB device */
+                char v[16] = "";
+                snprintf(p, sizeof p, "%s/idVendor", real);
+                if ((f = fopen(p, "r"))) { if (fgets(v, sizeof v, f) && !strncmp(v, "2e25", 4)) reader = 1; fclose(f); break; }
+                *q = 0;
             }
-            games[ngames].path = p; games[ngames].label = lab; games[ngames].tex = NULL;
-            games[ngames].recent = recent_rank(e->d_name);
-            ngames++;
+            if (reader) continue;
+            snprintf(p, sizeof p, "/sys/block/%s/%s1", e->d_name, e->d_name);
+            snprintf(now, sizeof now, access(p, F_OK) == 0 ? "%s1" : "%s", e->d_name);
         }
         closedir(d);
     }
-    qsort(games, ngames, sizeof(Game), cmp_games);
-    nreal = ngames;
-    if (getenv("PCE_LAUNCHER_CART")) {      /* a HuCard is sitting in the slot */
-        games[ngames].path = strdup("__CART__");
-        games[ngames].label = strdup("Play the HuCard in the slot");
-        games[ngames].tex = NULL;
-        ngames++;
-    }
-    games[ngames].path = strdup("__PADTEST__");
-    games[ngames].label = strdup("Controller test");
-    games[ngames].tex = NULL; games[ngames].recent = 0;
-    ngames++;
-    games[ngames].path = strdup("__ABOUT__");
-    games[ngames].label = strdup("About");
-    games[ngames].tex = NULL; games[ngames].recent = 0;
-    ngames++;
-    games[ngames].path = strdup("__RETROARCH__");
-    games[ngames].label = strdup("RetroArch (advanced)");
-    games[ngames].tex = NULL;
-    ngames++;
-    games[ngames].path = strdup("__RESTART__");
-    games[ngames].label = strdup("Restart console");
-    games[ngames].tex = NULL;
-    ngames++;
+    if (!strcmp(now, usb_dev)) return 0;
+    snprintf(usb_dev, sizeof usb_dev, "%s", now);
+    SDL_Log("usb stick: %s", now[0] ? now : "removed");
+    return 1;
 }
 
 static int find_game(const char *path)
 {
     int i;
-    for (i = 0; i < nreal; i++) if (strcmp(games[i].path, path) == 0) return i;
+    for (i = npin; i < npin + nreal; i++) if (strcmp(games[i].path, path) == 0) return i;
     return -1;
 }
 
@@ -277,17 +574,39 @@ static int exists(const char *p) { return access(p, F_OK) == 0; }
 
 /* Delete a library game. Copies of it that the library made in data/ (to
  * run it from there) go too; raw cartridge dumps and save files stay. */
+static void unlink_ref(const char *dir, const char *name, void *arg)
+{
+    char p[1024];
+    (void)arg;
+    if (has_ext(name, ".cue")) each_ref(dir, name, unlink_ref, NULL);   /* m3u -> cue -> tracks */
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    unlink(p);
+}
+
 static int delete_game(int idx)
 {
-    char base[NAME_MAX_LEN * 2], p[1024];
+    char base[NAME_MAX_LEN * 2], p[1024], dir[1024];
     static const char *suffix[] = { ".pce", "-fixed.pce" };
+    const char *path = games[idx].path, *slash = strrchr(path, '/'), *file = slash ? slash + 1 : path;
     int i;
-    snprintf(base, sizeof base, "%s", games[idx].label);
-    for (i = 0; i < 2; i++) {
-        snprintf(p, sizeof p, "%s/%s%s", data_dir, base, suffix[i]);
-        if (exists(p) && files_equal(p, games[idx].path)) unlink(p);
+    snprintf(dir, sizeof dir, "%.*s", slash ? (int)(slash - path) : 1, slash ? path : ".");
+    if (games[idx].kind == K_CD) {
+        /* the disc's own files: tracks named in a .cue, discs in a .m3u, a .ccd's .img/.sub */
+        if (has_ext(file, ".cue") || has_ext(file, ".m3u")) each_ref(dir, file, unlink_ref, NULL);
+        else if (has_ext(file, ".ccd")) {
+            static const char *cx[] = { ".img", ".sub", ".IMG", ".SUB" };
+            int n = (int)strlen(file) - 4;
+            for (i = 0; i < 4; i++) { snprintf(p, sizeof p, "%s/%.*s%s", dir, n, file, cx[i]); unlink(p); }
+        }
+    } else {
+        snprintf(base, sizeof base, "%s", games[idx].label);
+        for (i = 0; i < 2; i++) {
+            snprintf(p, sizeof p, "%s/%s%s", data_dir, base, suffix[i]);
+            if (exists(p) && files_equal(p, path)) unlink(p);
+        }
     }
-    if (unlink(games[idx].path) != 0) return -1;
+    if (unlink(path) != 0) return -1;
+    if (games[idx].infold) rmdir(dir);      /* a CD game's own folder: removed once empty */
     sync();
     SDL_Log("deleted %s", games[idx].path);
     return 0;
@@ -295,14 +614,87 @@ static int delete_game(int idx)
 
 /* Rename a library game: record a new title for its file (the file and its
  * saves keep their names). Naming an unidentified HuCard dump (cart-<crc32>)
- * also adds it to the local game database (gamedb-local.csv), ready to share. */
+ * also adds it to the local game database (gamedb-local.csv), ready to share;
+ * naming a copied CD (cd-<disc id>.cue) adds it to cddb-local.csv the same way. */
+static void recent_rename(const char *from, const char *to);
+/* a file name made from a title: no characters FAT refuses, no trailing dots/spaces */
+static void safe_file(const char *in, char *out, size_t n)
+{
+    size_t i, k = 0;
+    for (i = 0; in[i] && k + 1 < n; i++) out[k++] = strchr("\\/:*?\"<>|", in[i]) ? '-' : in[i];
+    while (k && (out[k - 1] == '.' || out[k - 1] == ' ')) k--;
+    out[k] = 0;
+    if (!k) snprintf(out, n, "Game");
+}
+
+/* saves/<old>.* -> saves/<new>.* (battery save, save states and their pictures) */
+static void rename_saves(const char *oldbase, const char *newbase)
+{
+    DIR *d = opendir(saves_dir);
+    struct dirent *e;
+    size_t ol = strlen(oldbase);
+    char a[1200], b[1200];
+    if (!d) return;
+    while ((e = readdir(d)))
+        if (!strncmp(e->d_name, oldbase, ol) && e->d_name[ol] == '.') {
+            snprintf(a, sizeof a, "%s/%s", saves_dir, e->d_name);
+            snprintf(b, sizeof b, "%s/%s%s", saves_dir, newbase, e->d_name + ol);
+            if (!exists(b)) rename(a, b);
+        }
+    closedir(d);
+}
+
+/* keep a renamed file's colour: copy its read-check line */
+static void readcheck_copy(const char *from, const char *to)
+{
+    char crc[9];
+    int st = read_check(from, crc);
+    FILE *f;
+    if (st == C_NONE || !crc[0] || !(f = fopen(readcheck_path, "a"))) return;
+    fprintf(f, "%s\t%s\t%s\n", to, st == C_OK ? "ok" : st == C_MOD ? "mismatch" : "unknown", crc);
+    fclose(f);
+}
+
 static int rename_game(int idx, const char *newname, char *newpath, size_t np)
 {
     const char *file = strrchr(games[idx].path, '/') ? strrchr(games[idx].path, '/') + 1 : games[idx].path;
-    char crc[9];
-    FILE *f = fopen(titles_path, "a");
-    if (!f) return -1;
-    fprintf(f, "%s\t%s\n", file, newname);
+    char crc[9], dir[1024], safe[NAME_MAX_LEN + 1], shown[600];
+    FILE *f;
+    snprintf(dir, sizeof dir, "%.*s", (int)(file - games[idx].path) - 1, games[idx].path);
+    snprintf(shown, sizeof shown, "%s", file);
+    safe_file(newname, safe, sizeof safe);
+    snprintf(newpath, np, "%s", games[idx].path);
+    /* the file on the card gets the new name too, so the SD card reads like the library */
+    if (games[idx].kind == K_CD) {
+        /* a CD in its own folder: the folder is renamed (the .cue and its tracks
+         * keep their names, so the saves stay matched) */
+        if (games[idx].infold) {
+            char nd[1200], *sl = strrchr(dir, '/');
+            snprintf(nd, sizeof nd, "%.*s/%s", (int)(sl - dir), dir, safe);
+            if (strcmp(nd, dir) && !exists(nd) && rename(dir, nd) == 0) snprintf(newpath, np, "%s/%s", nd, file);
+        }
+    } else {
+        const char *dot = strrchr(file, '.');
+        char nf[NAME_MAX_LEN + 16], np2[1200], ob[600], nb[NAME_MAX_LEN + 16];
+        int k;
+        snprintf(nf, sizeof nf, "%s%s", safe, dot ? dot : "");
+        snprintf(np2, sizeof np2, "%s/%s", dir, nf);
+        for (k = 2; exists(np2) && strcmp(np2, games[idx].path) && k < 10; k++) {   /* name taken: "Name (2)" */
+            snprintf(nf, sizeof nf, "%s (%d)%s", safe, k, dot ? dot : "");
+            snprintf(np2, sizeof np2, "%s/%s", dir, nf);
+        }
+        if (strcmp(np2, games[idx].path) && !exists(np2) && rename(games[idx].path, np2) == 0) {
+            snprintf(ob, sizeof ob, "%.*s", dot ? (int)(dot - file) : (int)strlen(file), file);
+            snprintf(nb, sizeof nb, "%.*s", (int)(strlen(nf) - (dot ? strlen(dot) : 0)), nf);
+            rename_saves(ob, nb);
+            recent_rename(file, nf);
+            readcheck_copy(file, nf);
+            snprintf(shown, sizeof shown, "%s", nf);
+            snprintf(newpath, np, "%s", np2);
+        }
+    }
+    if (!(f = fopen(titles_path, "a"))) return -1;
+    fprintf(f, "%s\t%s\n", shown, newname);
     fclose(f);
     if (cart_crc(file, crc)) {
         int fresh = !exists(localdb_path);
@@ -315,9 +707,221 @@ static int rename_game(int idx, const char *newname, char *newpath, size_t np)
             fclose(f);
         }
     }
+    {
+        unsigned id;
+        char tail[8] = "", cdb[600];
+        if (sscanf(file, "cd-%8x%7s", &id, tail) == 2 && !strcmp(tail, ".cue") && strlen(file) == 15) {
+            int fresh;
+            snprintf(cdb, sizeof cdb, "%s", localdb_path);
+            if (strrchr(cdb, '/')) strcpy(strrchr(cdb, '/') + 1, "cddb-local.csv"); else strcpy(cdb, "cddb-local.csv");
+            fresh = !exists(cdb);
+            if ((f = fopen(cdb, "a"))) {
+                const char *c;
+                if (fresh) fprintf(f, "discid,title,region,notes\r\n");
+                fprintf(f, "0x%08x,\"", id);
+                for (c = newname; *c; c++) { if (*c == '"') fputc('"', f); fputc(*c, f); }
+                fprintf(f, "\",,named on console\r\n");
+                fclose(f);
+            }
+        }
+    }
     sync();
-    snprintf(newpath, np, "%s", games[idx].path);
-    SDL_Log("titled %s -> %s", file, newname);
+    SDL_Log("titled %s -> %s (%s)", file, newname, newpath);
+    return 0;
+}
+
+/* SELECT menu entries for a game, by kind */
+/* Move to...: where a game can go. Its tab (top), the folders of your own in
+ * that tab, the other HuCard tab (PC Engine <-> TurboGrafx-16), a new folder. */
+#define MAX_DEST 40
+static char dest_path[MAX_DEST][700], dest_name[MAX_DEST][100];
+static int ndest;
+static int has_disc(const char *dir);
+static int is_stock_dir(const char *dir);
+static void game_container(int idx, char *out, size_t n)     /* the folder the game (or its CD folder) is in */
+{
+    const char *p = games[idx].path, *sl = strrchr(p, '/');
+    snprintf(out, n, "%.*s", sl ? (int)(sl - p) : 0, p);
+    if (games[idx].kind == K_CD && games[idx].infold && (sl = strrchr(out, '/'))) out[sl - out] = 0;
+}
+static void add_dest(const char *name, const char *path)
+{
+    if (ndest >= MAX_DEST) return;
+    snprintf(dest_name[ndest], sizeof dest_name[0], "%s", name);
+    snprintf(dest_path[ndest], sizeof dest_path[0], "%s", path);
+    ndest++;
+}
+static void build_dests(int idx)
+{
+    char cont[1024], td[1024], p[1200], nm[100];
+    int t = games[idx].tab, other = t == T_PCE ? T_TG : t == T_TG ? T_PCE : 0;
+    DIR *d;
+    struct dirent *e;
+    ndest = 0;
+    game_container(idx, cont, sizeof cont);
+    snprintf(td, sizeof td, "%s/%s", lib_dir, tab_name[t]);
+    if (strcmp(cont, td)) { snprintf(nm, sizeof nm, "%s (no folder)", tab_name[t]); add_dest(nm, td); }
+    if ((d = opendir(td))) {
+        while ((e = readdir(d))) {
+            struct stat st;
+            if (e->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s", td, e->d_name);
+            if (stat(p, &st) || !S_ISDIR(st.st_mode) || has_disc(p) || !strcmp(p, cont)) continue;
+            snprintf(nm, sizeof nm, "Folder: %s", e->d_name);
+            add_dest(nm, p);
+        }
+        closedir(d);
+    }
+    if (other) { snprintf(nm, sizeof nm, "%s tab", tab_name[other]); snprintf(p, sizeof p, "%s/%s", lib_dir, tab_name[other]); add_dest(nm, p); }
+    add_dest("New folder...", "__NEW__");
+    add_dest("Cancel", "__CANCEL__");
+}
+/* move a game (a HuCard file, or a CD's own folder) into a folder */
+static int move_game(int idx, const char *todir, char *newpath, size_t np)
+{
+    const char *path = games[idx].path, *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    char src[1024], dst[1200];
+    if (games[idx].kind == K_CD) {
+        const char *sl;
+        if (!games[idx].infold) return -1;
+        snprintf(src, sizeof src, "%.*s", (int)(file - path) - 1, path);
+        sl = strrchr(src, '/');
+        snprintf(dst, sizeof dst, "%s/%s", todir, sl ? sl + 1 : src);
+        snprintf(newpath, np, "%s/%s", dst, file);
+    } else {
+        snprintf(src, sizeof src, "%s", path);
+        snprintf(dst, sizeof dst, "%s/%s", todir, file);
+        snprintf(newpath, np, "%s", dst);
+    }
+    if (exists(dst)) return -2;
+    mkdir(todir, 0755);
+    if (rename(src, dst) != 0) return -1;
+    sync();
+    SDL_Log("moved %s -> %s", src, dst);
+    return 0;
+}
+
+enum { OP_RENAME, OP_SGX, OP_HUCARD, OP_BIOS, OP_DELETE, OP_CANCEL, OP_MOVE };
+static int game_ops(int idx, int ops[7], const char *names[7])
+{
+    int n = 0, kind = games[idx].kind;
+    if (kind == K_DIR) {                         /* a folder of your own */
+        ops[n] = OP_RENAME; names[n++] = "Rename folder";
+        ops[n] = OP_DELETE; names[n++] = "Delete folder (when empty)";
+        ops[n] = OP_CANCEL; names[n++] = "Cancel";
+        return n;
+    }
+    ops[n] = OP_RENAME; names[n++] = "Rename";
+    if (games[idx].tab && (kind != K_CD || games[idx].infold)) { ops[n] = OP_MOVE; names[n++] = "Move to..."; }
+    if (kind == K_HUCARD) {
+        ops[n] = OP_SGX;  names[n++] = "Mark as SuperGrafx";
+        ops[n] = OP_BIOS; names[n++] = "Use as CD System Card";
+    } else if (kind == K_SGX) {
+        ops[n] = OP_HUCARD; names[n++] = "Mark as HuCard";
+    }
+    ops[n] = OP_DELETE; names[n++] = "Delete";
+    ops[n] = OP_CANCEL; names[n++] = "Cancel";
+    return n;
+}
+
+/* rewrite recent.txt with one file name replaced (or removed: to == NULL) */
+static void recent_rename(const char *from, const char *to)
+{
+    char tmp[600], line[512];
+    FILE *in = fopen(recent_path, "r"), *out;
+    if (!in) return;
+    snprintf(tmp, sizeof tmp, "%s.new", recent_path);
+    if (!(out = fopen(tmp, "w"))) { fclose(in); return; }
+    while (fgets(line, sizeof line, in)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, from)) { if (to) fprintf(out, "%s\n", to); }
+        else if (*line) fprintf(out, "%s\n", line);
+    }
+    fclose(in); fclose(out);
+    rename(tmp, recent_path);
+}
+
+/* Mark a HuCard as SuperGrafx (.pce -> .sgx) or back. Only the extension
+ * changes, so saves (named without it) stay matched; title and recent follow. */
+static int set_kind(int idx, int to_sgx, char *newpath, size_t np)
+{
+    const char *path = games[idx].path, *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    const char *dot = strrchr(file, '.');
+    char newfile[512];
+    FILE *f;
+    if (!dot) return -1;
+    snprintf(newfile, sizeof newfile, "%.*s%s", (int)(dot - file), file, to_sgx ? ".sgx" : ".pce");
+    snprintf(newpath, np, "%.*s%s", (int)(file - path), path, newfile);
+    {   /* in the library's own folders: move to the SuperGrafx / PC Engine folder */
+        char dir[1024];
+        snprintf(dir, sizeof dir, "%.*s", (int)(file - path) - 1, path);
+        if (!strcmp(dir, lib_dir) || is_stock_dir(dir)) {
+            char td[1024];
+            snprintf(td, sizeof td, "%s/%s", lib_dir, tab_name[to_sgx ? T_SGX : T_PCE]);
+            mkdir(td, 0755);
+            snprintf(newpath, np, "%s/%s", td, newfile);
+        }
+    }
+    if (exists(newpath)) return -1;
+    if (rename(path, newpath) != 0) return -1;
+    if ((f = fopen(titles_path, "a"))) {         /* keep the name shown */
+        fprintf(f, "%s\t%s\n", newfile, games[idx].label);
+        fclose(f);
+    }
+    recent_rename(file, newfile);
+    sync();
+    SDL_Log("kind: %s -> %s", file, newfile);
+    return 0;
+}
+
+static unsigned long crc32_buf(const unsigned char *p, size_t n)
+{
+    unsigned long c = 0xffffffffUL;
+    int k;
+    while (n--) { c ^= *p++; for (k = 0; k < 8; k++) c = c & 1 ? (c >> 1) ^ 0xedb88320UL : c >> 1; }
+    return c ^ 0xffffffffUL;
+}
+
+/* Use a dump as the CD BIOS: its first 256 KB (a System Card's whole ROM;
+ * the reader may dump more) go to bios/, named after the card when its
+ * checksum is known, else syscard3.pce (the name the cores try first).
+ * The dump then leaves the library. */
+static int use_as_bios(int idx, char *out, size_t on)
+{
+    static const struct { unsigned long crc; const char *name; } known[] = {
+        { 0x6d9a73efUL, "syscard3.pce" }, { 0x2b5b75feUL, "syscard3u.pce" },
+        { 0x52520bc6UL, "syscard2.pce" }, { 0x283b74e0UL, "syscard2.pce" },
+        { 0xff2a5ec3UL, "syscard2u.pce" }, { 0x3f9f95a4UL, "syscard1.pce" },
+        { 0x51a12d90UL, "gexpress.pce" } };
+    const char *name = "syscard3.pce";
+    unsigned char *buf = malloc(262144);
+    char dst[600], part[640];
+    size_t n;
+    unsigned long c;
+    unsigned i;
+    FILE *in, *o;
+    if (!buf) return -1;
+    if (!(in = fopen(games[idx].path, "rb"))) { free(buf); return -1; }
+    n = fread(buf, 1, 262144, in);
+    fclose(in);
+    if (n < 8192) { free(buf); return -1; }
+    c = crc32_buf(buf, n);
+    for (i = 0; i < sizeof known / sizeof known[0]; i++) if (known[i].crc == c) name = known[i].name;
+    mkdir(bios_dir, 0755);
+    snprintf(dst, sizeof dst, "%s/%s", bios_dir, name);
+    snprintf(part, sizeof part, "%s.part", dst);
+    if (!(o = fopen(part, "wb"))) { free(buf); return -1; }
+    if (fwrite(buf, 1, n, o) != n) { fclose(o); unlink(part); free(buf); return -1; }
+    free(buf);
+    if (fclose(o) != 0 || rename(part, dst) != 0) { unlink(part); return -1; }
+    {   /* out of the library */
+        const char *file = strrchr(games[idx].path, '/') ? strrchr(games[idx].path, '/') + 1 : games[idx].path;
+        recent_rename(file, NULL);
+        unlink(games[idx].path);
+    }
+    sync();
+    snprintf(out, on, "%s", name);
+    SDL_Log("bios: %s -> %s (crc32 %08lx, %lu bytes)", games[idx].path, dst, c, (unsigned long)n);
     return 0;
 }
 
@@ -438,23 +1042,61 @@ static void on_crash(int s)
     _exit(128 + s);
 }
 
+/* Where the library was left: "path\ntab\nfolder". gx-start writes only a
+ * path after a new dump or CD copy: then that game's tab is opened. */
+static const char *pos_file(void) { return getenv("PCE_LAUNCHER_POS") ? getenv("PCE_LAUNCHER_POS") : LAST_FILE; }
+static int tab_for_path(const char *path);
+static void load_pos(void)
+{
+    char path[1024] = "", tab[16] = "", folder[sizeof cur_folder] = "";
+    FILE *f = fopen(pos_file(), "r");
+    if (!f) return;
+    if (fgets(path, sizeof path, f) && fgets(tab, sizeof tab, f)) { if (!fgets(folder, sizeof folder, f)) folder[0] = 0; }
+    fclose(f);
+    path[strcspn(path, "\n")] = 0; tab[strcspn(tab, "\n")] = 0; folder[strcspn(folder, "\n")] = 0;
+    if (!path[0]) return;
+    if (tab[0] && atoi(tab) >= 0 && atoi(tab) < T_N) { cur_tab = atoi(tab); snprintf(cur_folder, sizeof cur_folder, "%s", folder); }
+    else if (path[0] == '/') {                    /* a new or re-inserted game: its tab, and its folder */
+        size_t n = strlen(lib_dir);
+        char rel[1024], *sl;
+        cur_tab = tab_for_path(path); cur_folder[0] = 0;
+        if (cur_tab && !strncmp(path, lib_dir, n) && path[n] == '/' && !strncmp(path + n + 1, tab_name[cur_tab], strlen(tab_name[cur_tab]))) {
+            snprintf(rel, sizeof rel, "%s", path + n + 1 + strlen(tab_name[cur_tab]));   /* "/RPG/x.pce" */
+            if ((sl = strrchr(rel, '/'))) *sl = 0;                                      /* "/RPG" */
+            if (cur_tab == T_CD && (sl = strrchr(rel, '/'))) *sl = 0;                  /* a CD's own folder */
+            if (rel[0] == '/' && !strchr(rel + 1, '/')) snprintf(cur_folder, sizeof cur_folder, "%s", rel + 1);
+        }
+    }
+}
 static int load_last(void)
 {
     char buf[1024];
     int i;
-    FILE *f = fopen(LAST_FILE, "r");
-    if (!f) return 0;
-    if (!fgets(buf, sizeof buf, f)) { fclose(f); return 0; }
+    FILE *f = fopen(pos_file(), "r");
+    if (!f) return nreal ? npin : 0;
+    if (!fgets(buf, sizeof buf, f)) { fclose(f); return nreal ? npin : 0; }
     fclose(f);
     buf[strcspn(buf, "\n")] = '\0';
     for (i = 0; i < ngames; i++) if (strcmp(games[i].path, buf) == 0) return i;
-    return 0;
+    return nreal ? npin : 0;
+}
+
+/* the tab a library path belongs to */
+static int tab_for_path(const char *path)
+{
+    char dir[1024];
+    const char *sl = strrchr(path, '/');
+    int t, k;
+    snprintf(dir, sizeof dir, "%.*s", sl ? (int)(sl - path) : 0, path);
+    if ((t = stock_tab(dir))) return t;
+    k = game_kind(sl ? sl + 1 : path);
+    return k == K_SGX ? T_SGX : k == K_CD ? T_CD : T_PCE;
 }
 
 static void save_last(const char *p)
 {
-    FILE *f = fopen(LAST_FILE, "w");
-    if (f) { fprintf(f, "%s\n", p); fclose(f); }
+    FILE *f = fopen(pos_file(), "w");
+    if (f) { fprintf(f, "%s\n%d\n%s\n", p, cur_tab, cur_folder); fclose(f); }
 }
 
 /* ----------------------------------------------------------- rendering */
@@ -464,7 +1106,8 @@ static TTF_Font *f_title, *f_item, *f_hint;
 static int W, H;
 static const SDL_Color white = {255, 255, 255, 255}, dim = {170, 178, 196, 255},
                        accent = {250, 210, 0, 255}, red = {255, 90, 80, 255},
-                       ink = {18, 18, 22, 255};    /* text on the yellow accent */
+                       ink = {18, 18, 22, 255},    /* text on the yellow accent */
+                       c_ok = {130, 225, 140, 255}, c_mod = {255, 170, 70, 255}, c_unk = {150, 156, 168, 255};
 
 static void text(TTF_Font *font, const char *s, SDL_Color c, int x, int y, int align)
 {
@@ -530,12 +1173,26 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
 {
     char line[4][256];
     Uint32 start = SDL_GetTicks(), last_read = 0, missing_since = 0;
-    int pct = -1, err = 0, frame = 0, i;
+    int pct = -1, err = 0, frame = 0, i, cancel = 0, asked = 0;
     memset(line, 0, sizeof line);
     for (;;) {
         SDL_Event ev;
         Uint32 now = SDL_GetTicks();
-        while (SDL_PollEvent(&ev)) if (ev.type == SDL_QUIT) _exit(0);
+        while (SDL_PollEvent(&ev)) {
+            int want = 0;
+            if (ev.type == SDL_QUIT) _exit(0);
+            if (ev.type == SDL_JOYDEVICEADDED) add_pad(ev.jdevice.which);
+            if (ev.type == SDL_JOYBUTTONDOWN) { PadMap *m = pad_map(ev.jbutton.which); want = m && ev.jbutton.button == m->b; }
+            if (ev.type == SDL_KEYDOWN) want = ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_BACKSPACE;
+            /* state "cancel": the job can be stopped with II; it watches for <status>.abort */
+            if (want && cancel && !asked) {
+                char ap[600];
+                FILE *af;
+                snprintf(ap, sizeof ap, "%s.abort", path);
+                if ((af = fopen(ap, "w"))) fclose(af);
+                asked = 1;
+            }
+        }
         if (quit_flag) _exit(0);
         if (now - last_read >= 100 || !last_read) {
             FILE *f = fopen(path, "r");
@@ -551,6 +1208,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
                 fclose(f);
                 if (!strcmp(line[3], "done")) _exit(0);
                 err = !strcmp(line[3], "error");
+                cancel = !strcmp(line[3], "cancel");
                 pct = (line[2][0] >= '0' && line[2][0] <= '9') ? atoi(line[2]) : -1;
                 if (pct > 100) pct = 100;
             }
@@ -560,7 +1218,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
         if (bg) { SDL_RenderCopy(ren, bg, NULL, NULL); fill(0, 0, W, H, 0, 0, 0, 90); }
         {
             int pw = W * 60 / 100, ph = H * 30 / 100, px, py, bx, by, bw, bh;
-            panel(pw, ph, &px, &py);
+            panel(pw, cancel ? ph + H / 14 : ph, &px, &py);
             draw_img(tex_emblem, px + pw / 40, py + ph / 14, H / 18, 0);
             text(f_item, line[0], err ? red : white, W / 2, py + ph * 18 / 100, 1);
             text(f_hint, line[1], accent, W / 2, py + ph * 40 / 100, 1);
@@ -571,6 +1229,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
                 fill(bx, by, bw * pct / 100, bh, accent.r, accent.g, accent.b, 255);
                 snprintf(t, sizeof t, "%d%%", pct);
                 text(f_hint, t, dim, W / 2, by + bh * 2, 1);
+                if (cancel) text(f_hint, asked ? "Cancelling..." : "II  Cancel", white, W / 2, py + ph, 1);
             } else if (!err) {                            /* activity only: no percentage */
                 int n = 8, r = H / 90 + 2, cx = W / 2, cy = by + bh / 2, k;
                 for (k = 0; k < n; k++) {
@@ -594,7 +1253,7 @@ static int run_status(const char *path, SDL_Texture *bg, const char *shot)
 
 /* ------------------------------------------------------- input actions */
 
-enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_RUN, A_SELECT };
+enum { A_NONE, A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_RUN, A_SELECT, A_DEBUG };   /* A_DEBUG: test hook */
 
 static int key_action(SDL_Keycode k)
 {
@@ -613,9 +1272,9 @@ static int key_action(SDL_Keycode k)
 
 static int test_action(const char *w)
 {
-    static const char *names[] = { "", "up", "down", "left", "right", "ok", "back", "run", "select" };
+    static const char *names[] = { "", "up", "down", "left", "right", "ok", "back", "run", "select", "debug" };
     int i;
-    for (i = 1; i < 9; i++) if (!strcmp(w, names[i])) return i;
+    for (i = 1; i < 10; i++) if (!strcmp(w, names[i])) return i;
     return A_NONE;
 }
 
@@ -623,6 +1282,8 @@ static int test_action(const char *w)
 static int queue[QMAX], qhead, qtail;
 static void push(int a) { if (a && (qtail + 1) % QMAX != qhead) { queue[qtail] = a; qtail = (qtail + 1) % QMAX; } }
 static int pop(void) { int a; if (qhead == qtail) return A_NONE; a = queue[qhead]; qhead = (qhead + 1) % QMAX; return a; }
+static int rep_dir;                 /* the d-pad direction held (repeat_tick) */
+static int repeat_tick(int lr);
 
 /* ------------------------------------------------------------ keyboard */
 
@@ -633,7 +1294,9 @@ static const char *kb_special[] = { "abc", "Space", "Del", "Clear", "Done", "Can
 
 /* ---------------------------------------------------------------- main */
 
-enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT };
+enum { M_LIST, M_OPTIONS, M_DELETE, M_KEYBOARD, M_MESSAGE, M_PLAY, M_ABOUT, M_ASK, M_DEBUG, M_USB, M_MOVE };
+enum { KB_FOR_GAME, KB_FOR_FOLDER, KB_FOR_NEWFOLDER };   /* what the keyboard is naming */
+static const char *opnames[7];
 
 /* ------------------------------------------------------ in-game menu */
 /* pce-launcher --ingame <command-fifo> <card-save-base> [title]
@@ -703,12 +1366,12 @@ static int ig_wait_file(const char *p, Uint32 timeout_ms)
 
 /* ---- settings ---- */
 #define NFILTERS 3                             /* Off, Scanlines, Composite TV */
-enum { OPT_ASPECT, OPT_FILTER, OPT_SMOOTH, OPT_VOLUME, OPT_FLICKER, OPT_TURBO1, OPT_TURBO2, OPT_N };
-static const char *opt_label[OPT_N] = { "Aspect ratio", "Screen filter", "Smoothing", "Volume",
+enum { OPT_ASPECT, OPT_FILTER, OPT_SMOOTH, OPT_PALETTE, OPT_VOLUME, OPT_FLICKER, OPT_TURBO1, OPT_TURBO2, OPT_N };
+static const char *opt_label[OPT_N] = { "Aspect ratio", "Screen filter", "Smoothing", "Composite colours", "Volume",
                                          "Reduce flicker", "Turbo I", "Turbo II" };
-static const char *opt_key[OPT_N] = { "aspect", "filter", "smooth", "volume", "flicker", "turbo1", "turbo2" };
-static const int opt_max[OPT_N] = { 1, NFILTERS - 1, 1, 10, 1, 1, 1 };
-static int opt_val[OPT_N] = { 0, 0, 0, 10, 0, 0, 0 };
+static const char *opt_key[OPT_N] = { "aspect", "filter", "smooth", "palette", "volume", "flicker", "turbo1", "turbo2" };
+static const int opt_max[OPT_N] = { 1, NFILTERS - 1, 1, 1, 10, 1, 1, 1 };
+static int opt_val[OPT_N] = { 0, 0, 0, 0, 10, 0, 0, 0 };
 static int opt_switch = -1;                    /* switch position when last seen */
 static int opt_dirty;                          /* changed in Options, not yet applied */
 /* CRT phosphor was removed in S2g-2: far too slow on this CPU. An old
@@ -773,9 +1436,10 @@ static void settings_save(void)
     snprintf(tmp, sizeof tmp, "%s.new", RA_SET);
     if ((f = fopen(tmp, "w"))) {
         int vol = opt_val[OPT_VOLUME];
-        fprintf(f, "aspect=%d\nfilter=%s\nsmooth=%d\nvolume=%d\nsprites=%d\nturbo1=%d\nturbo2=%d\n",
+        fprintf(f, "aspect=%d\nfilter=%s\nsmooth=%d\nvolume=%d\nsprites=%d\nturbo1=%d\nturbo2=%d\npalette=%d\n",
                 opt_val[OPT_ASPECT], filter_files[opt_val[OPT_FILTER]], opt_val[OPT_SMOOTH],
-                vol == 0 ? -80 : (vol - 10) * 3, opt_val[OPT_FLICKER], opt_val[OPT_TURBO1], opt_val[OPT_TURBO2]);
+                vol == 0 ? -80 : (vol - 10) * 3, opt_val[OPT_FLICKER], opt_val[OPT_TURBO1], opt_val[OPT_TURBO2],
+                opt_val[OPT_PALETTE]);
         fclose(f);
         rename(tmp, RA_SET);
     }
@@ -1091,7 +1755,7 @@ static int ig_menu(const char *title)
         SDL_Event ev;
         Uint32 now;
         ig_draw(mode, mode == IGM_OPTIONS ? osel : sel, tmode, tsel, cwhat, csel, title, NULL);
-        if (SDL_WaitEventTimeout(&ev, 50)) {
+        if (SDL_WaitEventTimeout(&ev, rep_dir ? 15 : 50)) {
             do {
                 switch (ev.type) {
                 case SDL_QUIT: quit_flag = 1; break;
@@ -1116,8 +1780,8 @@ static int ig_menu(const char *title)
             } while (SDL_PollEvent(&ev));
         }
         now = SDL_GetTicks();
-        if (held && now >= repeat_at) { push(held); repeat_at = now + 120; }
-        if (getenv("PCE_LAUNCHER_SHOT") && qhead == qtail) {   /* test hook: screenshot, exit */
+        repeat_tick(1); (void)held; (void)repeat_at;
+        if (getenv("PCE_LAUNCHER_SHOT") && qhead == qtail && !rep_dir) {   /* test hook: screenshot, exit */
             SDL_Surface *ss;
             ig_draw(mode, mode == IGM_OPTIONS ? osel : sel, tmode, tsel, cwhat, csel, title, NULL);
             ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -1315,9 +1979,81 @@ static int run_ingame(const char *title)
 /* ------------------------------------------------- library: About, pad test */
 #include <sys/statvfs.h>
 
+/* ---------------------------------------------------- hardware check */
+/* The cart reader (BTE TG Dumper, 2e25:988c: HuCard slot + both pad ports)
+ * and the front USB ports (hub 1a40:0101) are USB devices. If one is missing
+ * some time after start-up, say so on screen instead of failing silently. */
+#define HW_READER   1
+#define HW_READER_X 2      /* a 2e25 device with another ID (update mode?) */
+#define HW_HUB      4
+#define HW_GRACE_S  20     /* seconds after power-on before checking */
+#define HW_WARN_S   30     /* the reader re-connects at every cart change: warn only after 30 s missing */
+static int hw_flags = HW_READER | HW_HUB, hw_checked;
+static double hw_missing_since, hw_up;
+
+static int read_hex(const char *path)
+{
+    char b[16];
+    FILE *f = fopen(path, "r");
+    int v = -1;
+    if (f) { if (fgets(b, sizeof b, f)) v = (int)strtol(b, NULL, 16); fclose(f); }
+    return v;
+}
+
+static int hw_scan(void)
+{
+    const char *root = getenv("PCE_LAUNCHER_USB") ? getenv("PCE_LAUNCHER_USB") : "/sys/bus/usb/devices";   /* test hook */
+    DIR *d = opendir(root);
+    struct dirent *e;
+    char p[300];
+    int fl = 0;
+    if (!d) return HW_READER | HW_HUB;     /* not on the console: no warning */
+    while ((e = readdir(d))) {
+        int vid, pid;
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s/idVendor", root, e->d_name);
+        if ((vid = read_hex(p)) < 0) continue;
+        snprintf(p, sizeof p, "%s/%s/idProduct", root, e->d_name);
+        pid = read_hex(p);
+        if (vid == 0x2e25) fl |= pid == 0x988c ? HW_READER : HW_READER_X;
+        if (vid == 0x1a40 && pid == 0x0101) fl |= HW_HUB;
+    }
+    closedir(d);
+    return fl;
+}
+
+/* returns 1 when the result changed (the screen needs a redraw) */
+static int hw_check(void)
+{
+    double up = 0;
+    FILE *f = fopen("/proc/uptime", "r");
+    int old = hw_flags;
+    if (f) { if (fscanf(f, "%lf", &up) != 1) up = 0; fclose(f); }
+    hw_up = up;
+    if (up < HW_GRACE_S) return 0;
+    hw_flags = hw_scan();
+    if (hw_flags & HW_READER) hw_missing_since = 0;
+    else if (!hw_missing_since) hw_missing_since = up;
+    if (!hw_checked || hw_flags != old) {
+        hw_checked = 1;
+        if (!(hw_flags & HW_READER)) SDL_Log("hardware: cart reader not found%s", hw_flags & HW_READER_X ? " (a BTE device with another ID is present)" : "");
+        if (!(hw_flags & HW_HUB)) SDL_Log("hardware: front USB ports (hub) not found");
+        return hw_flags != old;
+    }
+    return !(hw_flags & HW_READER);     /* keep redrawing while the 30 s run */
+}
+
+static const char *hw_warning(void)
+{
+    if (!(hw_flags & HW_READER) && hw_missing_since && hw_up - hw_missing_since >= HW_WARN_S)
+        return hw_flags & HW_READER_X ? "Cart reader is in update mode: restart the console"
+                                      : "Cart reader not found: HuCards and the controller ports won't work";
+    return NULL;        /* the front USB ports are shown in About only */
+}
+
 static void draw_about(void)
 {
-    int pw = W * 70 / 100, ph = H * 58 / 100, px, py, nst = 0, lh = H / 17, y;
+    int pw = W * 70 / 100, ph = H * 66 / 100, px, py, nst = 0, lh = H / 17, y;
     char line[160];
     struct statvfs vf;
     DIR *d = opendir(saves_dir);
@@ -1334,17 +2070,66 @@ static void draw_about(void)
     if (draw_img(tex_logo, W / 2, y, H / 9, 1)) y += H / 9 + H / 40;
     else { text(f_title, "ArchGX", accent, W / 2, y, 1); y += H / 10; }
     text(f_hint, "Open-source firmware for the RetroN GX  -  build " ARCHGX_VERSION, dim, W / 2, y, 1); y += lh * 3 / 2;
-    snprintf(line, sizeof line, "Games: %d        Save states: %d", nreal, nst);
+    snprintf(line, sizeof line, "Games: %d        Save states: %d", ntotal, nst);
     text(f_item, line, white, W / 2, y, 1); y += lh;
     if (statvfs(lib_dir, &vf) == 0) {
         double fr = (double)vf.f_bavail * vf.f_frsize / 1e9, tot = (double)vf.f_blocks * vf.f_frsize / 1e9;
         snprintf(line, sizeof line, "SD card: %.1f GB free of %.1f GB", fr, tot);
         text(f_item, line, white, W / 2, y, 1);
     }
+    y += lh;
+    snprintf(line, sizeof line, "Cart reader: %s", hw_flags & HW_READER ? "OK" : "not found");
+    text(f_item, line, hw_flags & HW_READER ? white : red, W / 2 - W / 40, y, 2);
+    snprintf(line, sizeof line, "Front USB ports: %s", hw_flags & HW_HUB ? "OK" : "not found");
+    text(f_item, line, hw_flags & HW_HUB ? white : red, W / 2 + W / 40, y, 0);
     y += lh * 3 / 2;
     text(f_hint, "RetroArch 1.7.4 (with ArchGX patch)  -  Beetle PCE Fast", dim, W / 2, y, 1); y += lh;
     text(f_hint, "github.com/ArchGX/ArchGX  -  not affiliated with Hyperkin", dim, W / 2, y, 1);
     text(f_hint, "I / II  Close", dim, W / 2, py + ph - H / 16, 1);
+}
+
+/* Debug screen (hidden: hold SELECT for 3 s on About) */
+#define DBG_ITEMS (D_N + 1)            /* the options, then Close */
+static void draw_debug(int opt)
+{
+    int pw = W * 72 / 100, ph = H * 80 / 100, px, py, lh = H / 17, y, i, drive;
+    char line[200], ls[3][160], lp[600];
+    FILE *f;
+    const char *dev = getenv("PCE_LAUNCHER_CD") ? getenv("PCE_LAUNCHER_CD") : "/dev/sr0";
+    panel(pw, ph, &px, &py);
+    y = py + H / 40;
+    text(f_title, "Debug", accent, W / 2, y, 1); y += H / 10;
+    for (i = 0; i < DBG_ITEMS; i++, y += lh) {
+        if (i == opt) fill(px + W / 60, y - lh / 10, pw - W / 30, lh, 255, 255, 255, 40);
+        if (i < D_N) {
+            text(f_item, dbg_name[i], white, px + W / 30, y, 0);
+            text(f_item, dbg_val[i] ? "On" : "Off", dbg_val[i] ? c_ok : dim, px + pw - W / 30, y, 2);
+        } else text(f_item, "Close", white, W / 2, y, 1);
+    }
+    y += lh / 2;
+    fill(px + W / 30, y, pw - W / 15, 1, 255, 255, 255, 60); y += lh / 2;
+    drive = access(dev, F_OK) == 0;
+    snprintf(line, sizeof line, "Cart reader: %s", hw_flags & HW_READER ? "OK" : "not found");
+    text(f_hint, line, hw_flags & HW_READER ? white : red, px + W / 30, y, 0);
+    snprintf(line, sizeof line, "Front USB ports: %s", hw_flags & HW_HUB ? "OK" : "not found");
+    text(f_hint, line, hw_flags & HW_HUB ? white : red, W / 2, y, 1);
+    snprintf(line, sizeof line, "CD drive: %s", drive ? (cd_present ? "disc in" : "connected") : "none");
+    text(f_hint, line, white, px + pw - W / 30, y, 2); y += lh;
+    /* logs/last-session.txt (gx-start): title, dropped frames, how it closed */
+    snprintf(lp, sizeof lp, "%s", readcheck_path);
+    if (strrchr(lp, '/')) strcpy(strrchr(lp, '/') + 1, "logs/last-session.txt"); else strcpy(lp, "logs/last-session.txt");
+    ls[0][0] = ls[1][0] = ls[2][0] = 0;
+    if ((f = fopen(lp, "r"))) {
+        for (i = 0; i < 3 && fgets(ls[i], sizeof ls[i], f); i++) ls[i][strcspn(ls[i], "\r\n")] = 0;
+        fclose(f);
+    }
+    if (ls[0][0]) {
+        snprintf(line, sizeof line, "Last game: %s", ls[0]);
+        text(f_hint, line, white, px + W / 30, y, 0); y += lh * 3 / 4;
+        snprintf(line, sizeof line, "%s  -  %s", ls[1], ls[2]);
+        text(f_hint, line, dim, px + W / 30, y, 0);
+    } else text(f_hint, "Last game: none yet", dim, px + W / 30, y, 0);
+    text(f_hint, "I / Left / Right  Change      II  Close", dim, W / 2, py + ph - H / 16, 1);
 }
 
 static int pad_dir(SDL_Joystick *j, int which)      /* 0 up, 1 down, 2 left, 3 right */
@@ -1363,6 +2148,228 @@ static int pad_dir(SDL_Joystick *j, int which)      /* 0 up, 1 down, 2 left, 3 r
 }
 
 static int pad_btn(SDL_Joystick *j, int b) { return b >= 0 && SDL_JoystickGetButton(j, b); }
+
+/* Holding the d-pad repeats: the direction actually held is read from every
+ * pad each frame (some pads report the d-pad as a hat, others as axes, and
+ * events alone lose track). First press comes from the event; after 0.45 s
+ * it repeats ~12 a second, after 2 s ~30 a second. lr: Left/Right repeat too
+ * (keyboard, in-game menu); in lists they change tab or folder, so they don't. */
+static Uint32 rep_t0, rep_next;
+static int held_dir(int lr)
+{
+    static const int act[4] = { A_UP, A_DOWN, A_LEFT, A_RIGHT };
+    const char *t = getenv("PCE_LAUNCHER_HOLD");       /* test hook: "down:3000" holds Down 3 s */
+    int i, w;
+    if (t) {
+        int ms = strchr(t, ':') ? atoi(strchr(t, ':') + 1) : 0;
+        if ((int)SDL_GetTicks() < ms) return !strncmp(t, "up", 2) ? A_UP : A_DOWN;
+        return A_NONE;
+    }
+    for (i = 0; i < npads; i++) {
+        SDL_Joystick *j = SDL_JoystickFromInstanceID(pads[i].id);
+        if (!j) continue;
+        for (w = 0; w < (lr ? 4 : 2); w++) if (pad_dir(j, w)) return act[w];
+    }
+    return A_NONE;
+}
+static int repeat_tick(int lr)                   /* 1 when the held direction changed */
+{
+    Uint32 now = SDL_GetTicks();
+    int d = held_dir(lr);
+    if (d != rep_dir) {                       /* pressed, released or changed: start over */
+        if (d && getenv("PCE_LAUNCHER_HOLD") && !rep_dir) push(d);   /* test: the first press */
+        rep_dir = d; rep_t0 = now; rep_next = now + 450; return 1;
+    }
+    if (d && now >= rep_next) { push(d); rep_next = now + (now - rep_t0 > 2000 ? 33 : 80); }
+    return 0;
+}
+
+/* ---------------------------------------------------- USB copy picker */
+/* pce-launcher --pick import|export <root> <out-list>
+ * Browse <root> (the USB stick, or games/ for export) and tick what to copy.
+ * I ticks a game, a CD's folder or a file, and opens any other folder;
+ * SELECT ticks a whole folder; Left/II goes up; RUN copies. The first entry
+ * copies everything. <out-list> gets one path per line ("__ALL__" for
+ * everything); it stays empty when cancelled. */
+#define PK_MAX 600
+#define PK_TICKS 400
+typedef struct { char name[256]; char label[256]; int dir, disc; } PickEnt;
+static PickEnt pk[PK_MAX];
+static int npk;
+static char *pk_tick[PK_TICKS];
+static int npk_tick;
+static int pk_ticked(const char *p)
+{
+    int i;
+    for (i = 0; i < npk_tick; i++) if (!strcmp(pk_tick[i], p)) return i;
+    return -1;
+}
+static void pk_toggle(const char *p)
+{
+    int i = pk_ticked(p);
+    if (i >= 0) { free(pk_tick[i]); pk_tick[i] = pk_tick[--npk_tick]; }
+    else if (npk_tick < PK_TICKS) pk_tick[npk_tick++] = strdup(p);
+}
+static int pk_cmp(const void *a, const void *b)
+{
+    const PickEnt *x = a, *y = b;
+    if (x->dir != y->dir) return x->dir ? -1 : 1;
+    return strcasecmp(x->label, y->label);
+}
+static int pk_wanted(const char *n)          /* games, saves, patches */
+{
+    static const char *ext[] = { ".srm", ".state", ".state1", ".state2", ".state3", ".state4", ".ips", ".bps", ".png" };
+    unsigned i;
+    if (game_kind(n) >= 0) return 1;
+    for (i = 0; i < sizeof ext / sizeof ext[0]; i++) if (has_ext(n, ext[i])) return 1;
+    return 0;
+}
+static void pk_scan(const char *dir, int export)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    npk = 0;
+    if (!d) return;
+    while ((e = readdir(d)) && npk < PK_MAX) {
+        char p[1200];
+        struct stat st;
+        const char *t;
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "System Volume Information")) continue;
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (stat(p, &st)) continue;
+        pk[npk].dir = S_ISDIR(st.st_mode);
+        if (!pk[npk].dir && !pk_wanted(e->d_name)) continue;
+        if (!pk[npk].dir && (has_ext(e->d_name, ".bin") || has_ext(e->d_name, ".img"))) continue;
+        pk[npk].disc = pk[npk].dir && has_disc(p);
+        snprintf(pk[npk].name, sizeof pk[0].name, "%s", e->d_name);
+        t = export && !pk[npk].dir ? title_for(e->d_name) : NULL;
+        snprintf(pk[npk].label, sizeof pk[0].label, "%s", t ? t : e->d_name);
+        if (!pk[npk].dir && !t) { char *dot = strrchr(pk[npk].label, '.'); if (dot && dot != pk[npk].label) *dot = 0; }
+        npk++;
+    }
+    closedir(d);
+    qsort(pk, npk, sizeof pk[0], pk_cmp);
+}
+static int run_picker(int export, const char *root, const char *out, SDL_Texture *bg, const char *shot)
+{
+    char cur[1024];
+    int sel = 0, top = 0, all = 0, i, rows, row_h = H / 15, list_y = H * 22 / 100, list_x = W / 10, list_w = W - 2 * list_x;
+    FILE *f;
+    rows = (H * 62 / 100) / row_h;
+    snprintf(cur, sizeof cur, "%s", root);
+    pk_scan(cur, export);
+    if ((f = fopen(out, "w"))) fclose(f);          /* cancelled until RUN */
+    if (getenv("PCE_LAUNCHER_KEYS")) {
+        char buf[1024], *t;
+        snprintf(buf, sizeof buf, "%s", getenv("PCE_LAUNCHER_KEYS"));
+        for (t = strtok(buf, ","); t; t = strtok(NULL, ",")) push(test_action(t));
+    }
+    for (;;) {
+        SDL_Event ev;
+        int a, atroot = !strcmp(cur, root), first = atroot ? 2 : 1, n = npk + first;   /* top: "everything" and "clear" at the root, ".." below */
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) _exit(0);
+            if (ev.type == SDL_KEYDOWN) push(key_action(ev.key.keysym.sym));
+            if (ev.type == SDL_JOYDEVICEADDED) add_pad(ev.jdevice.which);
+            if (ev.type == SDL_JOYHATMOTION) {
+                int v = ev.jhat.value;
+                push(v & SDL_HAT_UP ? A_UP : v & SDL_HAT_DOWN ? A_DOWN : v & SDL_HAT_LEFT ? A_LEFT : v & SDL_HAT_RIGHT ? A_RIGHT : A_NONE);
+            }
+            if (ev.type == SDL_JOYAXISMOTION && ev.jaxis.axis <= 1 && (ev.jaxis.value < -16000 || ev.jaxis.value > 16000))
+                push(ev.jaxis.axis == 1 ? (ev.jaxis.value < 0 ? A_UP : A_DOWN) : (ev.jaxis.value < 0 ? A_LEFT : A_RIGHT));
+            if (ev.type == SDL_JOYBUTTONDOWN) {
+                PadMap *m = pad_map(ev.jbutton.which);
+                int b = ev.jbutton.button;
+                if (m) push(b == m->a ? A_OK : b == m->b ? A_BACK : b == m->start ? A_RUN : b == m->select ? A_SELECT : A_NONE);
+            }
+        }
+        if (quit_flag) _exit(0);
+        repeat_tick(0);
+        while ((a = pop()) != A_NONE) {
+            const PickEnt *e;
+            atroot = !strcmp(cur, root); first = atroot ? 2 : 1; n = npk + first;
+            if (sel >= n) sel = n - 1;
+            e = sel >= first ? &pk[sel - first] : NULL;
+            char p[1200];
+            if (e) snprintf(p, sizeof p, "%s/%s", cur, e->name);
+            if (a == A_UP) sel = sel > 0 ? sel - 1 : n - 1;
+            else if (a == A_DOWN) sel = sel < n - 1 ? sel + 1 : 0;
+            else if (a == A_BACK || a == A_LEFT || (a == A_OK && !e && !atroot)) {
+                if (atroot) { if (a == A_BACK) { SDL_Log("pick: cancelled"); _exit(0); } }
+                else {
+                    char *sl = strrchr(cur, '/');
+                    if (sl) *sl = 0;
+                    pk_scan(cur, export); sel = 0; top = 0;
+                }
+            } else if (a == A_OK && !e && sel == 1) {                     /* clear all ticks */
+                while (npk_tick) free(pk_tick[--npk_tick]);
+                all = 0;
+            } else if (a == A_OK && !e) all = !all;                      /* everything */
+            else if (a == A_OK && e && e->dir && !e->disc) {              /* open a folder */
+                snprintf(cur, sizeof cur, "%s", p); pk_scan(cur, export); sel = 0; top = 0;
+            } else if ((a == A_OK || a == A_SELECT) && e) pk_toggle(p);
+            else if (a == A_RUN) {
+                if (!all && !npk_tick) continue;                          /* nothing ticked yet */
+                if ((f = fopen(out, "w"))) {
+                    if (all) fprintf(f, "__ALL__\n");
+                    else for (i = 0; i < npk_tick; i++) fprintf(f, "%s\n", pk_tick[i]);
+                    fclose(f);
+                }
+                SDL_Log("pick: %s, %d ticked", all ? "everything" : "chosen", npk_tick);
+                _exit(0);
+            }
+        }
+        atroot = !strcmp(cur, root); first = atroot ? 2 : 1; n = npk + first;
+        if (sel >= n) sel = n ? n - 1 : 0;
+        if (sel < top) top = sel;
+        if (sel >= top + rows) top = sel - rows + 1;
+        SDL_SetRenderDrawColor(ren, 20, 22, 30, 255);
+        SDL_RenderClear(ren);
+        if (bg) { SDL_RenderCopy(ren, bg, NULL, NULL); fill(0, 0, W, H, 0, 0, 0, 160); }
+        {
+            char head[1200], cnt[64];
+            text(f_title, export ? "Export to the USB stick" : "Import from the USB stick", white, list_x, H * 3 / 100, 0);
+            snprintf(head, sizeof head, "%s%s", export ? "games" : "USB stick", cur + strlen(root));
+            text(f_hint, head, dim, list_x, H * 11 / 100, 0);
+            snprintf(cnt, sizeof cnt, all ? "Everything" : "%d ticked", npk_tick);
+            text(f_hint, cnt, accent, list_x + list_w, H * 11 / 100, 2);
+            fill(list_x, H * 17 / 100, list_w, H / 240 + 1, accent.r, accent.g, accent.b, 255);
+        }
+        for (i = 0; i < rows && top + i < n; i++) {
+            int k = top + i, y = list_y + i * row_h, box = row_h / 2, on = 0;
+            const char *lab, *tag = "";
+            char p[1200];
+            if (k == sel) fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
+            if (k == 1 && atroot) {
+                text(f_item, "Clear all ticks", accent, list_x + W / 60, y + (row_h - 4 - TTF_FontHeight(f_item)) / 2, 0);
+                continue;
+            }
+            if (k < first) {
+                lab = atroot ? (export ? "Everything (all games and saves)" : "Everything (games, saves, BIOS, patches)") : "..  (back)";
+                on = atroot && all;
+                if (!atroot) { text(f_item, lab, accent, list_x + W / 60, y + (row_h - 4 - TTF_FontHeight(f_item)) / 2, 0); continue; }
+            } else {
+                const PickEnt *e = &pk[k - first];
+                snprintf(p, sizeof p, "%s/%s", cur, e->name);
+                lab = e->label; on = all || pk_ticked(p) >= 0;
+                tag = e->disc ? "CD" : e->dir ? "Folder" : "";
+            }
+            fill(list_x + W / 60, y + (row_h - 4 - box) / 2, box, box, on ? accent.r : 90, on ? accent.g : 94, on ? accent.b : 110, 255);
+            if (!on) fill(list_x + W / 60 + 2, y + (row_h - 4 - box) / 2 + 2, box - 4, box - 4, 28, 30, 40, 255);
+            text(f_item, lab, white, list_x + W / 60 + box + W / 60, y + (row_h - 4 - TTF_FontHeight(f_item)) / 2, 0);
+            if (*tag) text(f_hint, tag, dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+        }
+        if (!npk) text(f_hint, "Nothing to copy here", dim, W / 2, list_y + row_h * 2, 1);
+        text(f_hint, "I  Tick / open folder     SELECT  Tick folder     II  Back     RUN  Copy", dim, W / 2, H * 91 / 100, 1);
+        if (shot && qhead == qtail && !rep_dir) {
+            SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
+            if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0) SDL_SaveBMP(ss, shot);
+            _exit(3);
+        }
+        SDL_RenderPresent(ren);
+        SDL_Delay(16);
+    }
+}
 
 /* Controller test: every connected pad with its d-pad and four buttons.
  * Hold SELECT + RUN for a second (or Escape) to leave. */
@@ -1439,7 +2446,9 @@ int main(int argc, char **argv)
     SDL_DisplayMode dm;
     int sel = 0, top = 0, rows, row_h, list_y, list_x, list_w, dirty = 1, i;
     int mode = M_LIST, opt = 0, held = 0, kb_r = 0, kb_c = 0, kb_lower = 0;
+    Uint32 about_sel = 0;
     char kb_text[NAME_MAX_LEN + 1] = "", msg[160] = "";
+    int kb_for = KB_FOR_GAME;
     Uint32 last_cart = 0, repeat_at = 0, msg_until = 0;
     unsigned long cart0;
     const char *shot = getenv("PCE_LAUNCHER_SHOT");
@@ -1447,14 +2456,15 @@ int main(int argc, char **argv)
 
     int status_mode = argc == 3 && !strcmp(argv[1], "--status");
     int ingame_mode = (argc == 4 || argc == 5) && !strcmp(argv[1], "--ingame");
-    if (argc != 3 && !ingame_mode) {
+    int pick_mode = argc == 5 && !strcmp(argv[1], "--pick");
+    if (argc != 3 && !ingame_mode && !pick_mode) {
         fprintf(stderr, "usage: %s <library-dir> <out-file> | --status <file> | --ingame <fifo> <state-base> [title]\n", argv[0]);
         return 1;
     }
     signal(SIGTERM, on_signal); signal(SIGINT, on_signal);
     signal(SIGSEGV, on_crash); signal(SIGBUS, on_crash); signal(SIGABRT, on_crash);
 
-    snprintf(lib_dir, sizeof lib_dir, "%s", argv[1]);
+    snprintf(lib_dir, sizeof lib_dir, "%s", pick_mode ? argv[3] : argv[1]);
     while (strlen(lib_dir) > 1 && lib_dir[strlen(lib_dir) - 1] == '/') lib_dir[strlen(lib_dir) - 1] = '\0';
     snprintf(data_dir, sizeof data_dir, "%s", lib_dir);
     slash = strrchr(data_dir, '/');
@@ -1462,8 +2472,12 @@ int main(int argc, char **argv)
     snprintf(titles_path, sizeof titles_path, "%.*stitles.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(localdb_path, sizeof localdb_path, "%.*sgamedb-local.csv", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
     snprintf(recent_path, sizeof recent_path, "%.*srecent.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(bios_dir, sizeof bios_dir, "%.*sbios", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(readcheck_path, sizeof readcheck_path, "%.*sread-check.txt", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    snprintf(debug_path, sizeof debug_path, "%.*sdebug.cfg", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
+    debug_load();
     snprintf(saves_dir, sizeof saves_dir, "%.*ssaves", slash ? (int)(slash - data_dir + 1) : 0, data_dir);
-    cart0 = (status_mode || ingame_mode) ? 0 : cart_state();
+    cart0 = (status_mode || ingame_mode || pick_mode) ? 0 : cart_state();
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
     if (TTF_Init() != 0) { fprintf(stderr, "TTF_Init: %s\n", TTF_GetError()); return 1; }
@@ -1490,15 +2504,31 @@ int main(int argc, char **argv)
     if (!f_title || !f_item || !f_hint) { fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError()); return 1; }
     bg = IMG_LoadTexture(ren, BG_PATH);
     load_brand();
-    if (status_mode) return run_status(argv[2], bg, shot);
+    if (pick_mode) {
+        for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
+        load_titles();
+        return run_picker(!strcmp(argv[2], "export"), lib_dir, argv[4], bg, shot);
+    }
+    if (status_mode) {
+        for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);       /* II cancels a CD copy */
+        return run_status(argv[2], bg, shot);
+    }
 
+    cd_check();
+    usb_check();
+    if (getenv("PCE_LAUNCHER_ASK")) cur_tab = tab_for_path(getenv("PCE_LAUNCHER_ASK"));
+    else load_pos();                                /* back where you left off */
     scan_library();
-    SDL_Log("screen %dx%d, %d games, data dir %s", W, H, nreal, data_dir);
+    if (cur_folder[0] && !nreal) { cur_folder[0] = 0; scan_library(); }   /* the folder has gone */
+    SDL_Log("screen %dx%d, %d games, data dir %s", W, H, ntotal, data_dir);
     for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
 
     row_h = H / 15; list_y = H * 22 / 100; list_x = W / 10; list_w = W - 2 * list_x;
     rows = (H * 66 / 100) / row_h;
     sel = load_last();
+    if (getenv("PCE_LAUNCHER_ASK") && (i = find_game(getenv("PCE_LAUNCHER_ASK"))) >= 0) {
+        sel = i; mode = M_ASK; opt = 0;          /* a new unknown HuCard: how to play it? */
+    }
 
     if (getenv("PCE_LAUNCHER_KEYS")) {
         char buf[1024], *t;
@@ -1512,7 +2542,7 @@ int main(int argc, char **argv)
         int a;
 
         /* ---- collect input into the action queue ---- */
-        if (qhead == qtail ? SDL_WaitEventTimeout(&ev, 50) : SDL_PollEvent(&ev)) {
+        if (qhead == qtail ? SDL_WaitEventTimeout(&ev, rep_dir ? 15 : 50) : SDL_PollEvent(&ev)) {
             do {
                 last_event = (sig_atomic_t)ev.type;
                 switch (ev.type) {
@@ -1554,37 +2584,112 @@ int main(int argc, char **argv)
             } while (SDL_PollEvent(&ev));
         }
         now = SDL_GetTicks();
-        if (held && now >= repeat_at) { push(held); repeat_at = now + 90; }
+        if (repeat_tick(mode == M_KEYBOARD)) dirty = 1;
+        if (about_sel && mode == M_ABOUT) {        /* SELECT on About: released = close, held 3 s = Debug */
+            int k, down = 0;
+            for (k = 0; k < npads; k++) {
+                SDL_Joystick *j = SDL_JoystickFromInstanceID(pads[k].id);
+                if (j && pad_btn(j, pads[k].map.select)) down = 1;
+            }
+            if (!down) { mode = M_LIST; about_sel = 0; dirty = 1; }
+            else if (now - about_sel >= 3000) { mode = M_DEBUG; opt = 0; about_sel = 0; dirty = 1; SDL_Log("debug screen opened"); }
+        } else about_sel = 0;
 
         /* ---- handle actions ---- */
         while ((a = pop()) != A_NONE) {
             dirty = 1;
             if (mode == M_MESSAGE) { mode = M_LIST; continue; }
-            if (mode == M_ABOUT) { if (a == A_OK || a == A_BACK || a == A_RUN || a == A_SELECT) mode = M_LIST; continue; }
+            if (a == A_DEBUG) { mode = M_DEBUG; opt = 0; continue; }
+            if (mode == M_ABOUT) {
+                if (a == A_SELECT) about_sel = now ? now : 1;      /* held 3 s: Debug (checked below) */
+                else if (a == A_OK || a == A_BACK || a == A_RUN) mode = M_LIST;
+                continue;
+            }
+            if (mode == M_DEBUG) {
+                if (a == A_UP) opt = (opt + DBG_ITEMS - 1) % DBG_ITEMS;
+                else if (a == A_DOWN) opt = (opt + 1) % DBG_ITEMS;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == D_N)) mode = M_LIST;
+                else if (opt < D_N && (a == A_OK || a == A_RUN || a == A_LEFT || a == A_RIGHT)) {
+                    dbg_val[opt] = !dbg_val[opt]; debug_save();
+                    SDL_Log("debug: %s=%d", dbg_key[opt], dbg_val[opt]);
+                    if (opt == D_CRC) { int k; for (k = 0; k < ngames; k++) if (games[k].tex) { SDL_DestroyTexture(games[k].tex); games[k].tex = NULL; } }
+                }
+                continue;
+            }
 
             if (mode == M_LIST) {
-                if (a == A_UP || a == A_DOWN) {
+                if (!ngames && a != A_LEFT && a != A_RIGHT) ;    /* an empty tab */
+                else if (a == A_UP || a == A_DOWN) {
                     sel += a == A_UP ? -1 : 1;
                     if (sel < 0) sel = ngames - 1;
                     if (sel >= ngames) sel = 0;
-                } else if (a == A_LEFT || a == A_RIGHT) {
-                    sel += a == A_LEFT ? -rows : rows;
-                    if (sel < 0) sel = 0;
-                    if (sel >= ngames) sel = ngames - 1;
-                } else if ((a == A_OK || a == A_RUN) && sel < nreal && has_state(games[sel].path)) {
+                } else if (a == A_LEFT || a == A_RIGHT) {     /* next / previous tab */
+                    cur_tab = (cur_tab + (a == A_LEFT ? T_N - 1 : 1)) % T_N;
+                    cur_folder[0] = 0;
+                    scan_library();
+                    sel = nreal ? npin : 0; top = 0;
+                } else if ((a == A_OK || a == A_RUN) && REAL(sel) && games[sel].kind == K_DIR) {   /* open a folder */
+                    snprintf(cur_folder, sizeof cur_folder, "%s", games[sel].label);
+                    scan_library();
+                    sel = nreal ? npin : 0; top = 0;
+                } else if (a == A_BACK && cur_folder[0]) {                /* back to the tab */
+                    char back[1024];
+                    snprintf(back, sizeof back, "%s/%s/%s", lib_dir, tab_name[cur_tab], cur_folder);
+                    cur_folder[0] = 0;
+                    scan_library();
+                    sel = (i = find_game(back)) >= 0 ? i : nreal ? npin : 0; top = 0;
+                } else if ((a == A_OK || a == A_RUN) && REAL(sel) && has_state(games[sel].path)) {
                     mode = M_PLAY; opt = 0;                      /* Resume / Start new game */
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__PADTEST__")) {
                     run_padtest(); qhead = qtail = 0; held = 0;
                 } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__ABOUT__")) {
                     mode = M_ABOUT;
+                } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__REPORT__") && usb_dev[0]) {
+                    FILE *f = fopen(argv[2], "w");
+                    if (f) { fprintf(f, "__USB__:report:%s\n", usb_dev); fclose(f); }
+                    save_last(games[sel].path);
+                    SDL_Log("exit: bug report to usb %s", usb_dev);
+                    _exit(0);
+                } else if ((a == A_OK || a == A_RUN) && !strcmp(games[sel].path, "__USB__")) {
+                    mode = M_USB; opt = 0;
                 } else if (a == A_OK || a == A_RUN) {
                     FILE *f = fopen(argv[2], "w");
                     if (f) { fprintf(f, "%s\n", games[sel].path); fclose(f); }
                     save_last(games[sel].path);
                     SDL_Log("exit: chose %s", games[sel].path);
                     _exit(0);   /* skip SDL/Mali teardown */
-                } else if (a == A_SELECT && sel < nreal) {
+                } else if (a == A_SELECT && REAL(sel)) {
                     mode = M_OPTIONS; opt = 0;
+                }
+            } else if (mode == M_MOVE) {
+                if (a == A_UP && opt > 0) opt--;
+                else if (a == A_DOWN && opt < ndest - 1) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && !strcmp(dest_path[opt], "__CANCEL__"))) mode = M_LIST;
+                else if ((a == A_OK || a == A_RUN) && !strcmp(dest_path[opt], "__NEW__")) {
+                    mode = M_KEYBOARD; kb_r = 0; kb_c = 0; kb_lower = 0; kb_for = KB_FOR_NEWFOLDER; kb_text[0] = 0;
+                } else if (a == A_OK || a == A_RUN) {
+                    char np[1200], lab[NAME_MAX_LEN * 2];
+                    int r;
+                    snprintf(lab, sizeof lab, "%s", games[sel].label);
+                    r = move_game(sel, dest_path[opt], np, sizeof np);
+                    if (!r) snprintf(msg, sizeof msg, "Moved \"%s\"", lab);
+                    else snprintf(msg, sizeof msg, r == -2 ? "Already there: a game with that name exists" : "Could not move \"%s\"", lab);
+                    scan_library();
+                    if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
+                    mode = M_MESSAGE; msg_until = now + 2000;
+                }
+            } else if (mode == M_USB) {
+                if (a == A_UP && opt > 0) opt--;
+                else if (a == A_DOWN && opt < 3) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == 3)) mode = M_LIST;
+                else if (a == A_OK || a == A_RUN) {
+                    static const char *job[] = { "import", "export", "report" };
+                    FILE *f = fopen(argv[2], "w");
+                    if (f) { fprintf(f, "__USB__:%s:%s\n", job[opt], usb_dev); fclose(f); }
+                    save_last(games[sel].path);
+                    SDL_Log("exit: usb %s %s", job[opt], usb_dev);
+                    _exit(0);
                 }
             } else if (mode == M_PLAY) {
                 if (a == A_UP && opt > 0) opt--;
@@ -1597,17 +2702,65 @@ int main(int argc, char **argv)
                     SDL_Log("exit: chose %s (%s)", games[sel].path, opt == 0 ? "resume" : "new game");
                     _exit(0);
                 }
-            } else if (mode == M_OPTIONS) {
+            } else if (mode == M_ASK) {
                 if (a == A_UP && opt > 0) opt--;
-                else if (a == A_DOWN && opt < 2) opt++;
-                else if (a == A_BACK || a == A_SELECT || (a == A_OK && opt == 2)) mode = M_LIST;
+                else if (a == A_DOWN && opt < 3) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && opt == 3)) mode = M_LIST;
                 else if (a == A_OK || a == A_RUN) {
-                    if (opt == 0) {
+                    char np[1024], bn[64];
+                    const char *play = NULL;
+                    if (opt == 0) play = games[sel].path;
+                    else if (opt == 1) {
+                        if (set_kind(sel, 1, np, sizeof np) == 0) play = np;
+                        else { snprintf(msg, sizeof msg, "Could not change the game"); mode = M_MESSAGE; msg_until = now + 2500; }
+                    } else {
+                        if (use_as_bios(sel, bn, sizeof bn) == 0) snprintf(msg, sizeof msg, "Saved as CD System Card (bios/%s)", bn);
+                        else snprintf(msg, sizeof msg, "Could not save it as a System Card");
+                        scan_library();
+                        if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
+                        mode = M_MESSAGE; msg_until = now + 3000;
+                    }
+                    if (play) {
+                        FILE *f = fopen(argv[2], "w");
+                        if (f) { fprintf(f, "%s\n", play); fclose(f); }
+                        save_last(play);
+                        SDL_Log("exit: chose %s (new HuCard)", play);
+                        _exit(0);
+                    }
+                }
+            } else if (mode == M_OPTIONS) {
+                int ops[7], nops = game_ops(sel, ops, (const char **)opnames);
+                if (a == A_UP && opt > 0) opt--;
+                else if (a == A_DOWN && opt < nops - 1) opt++;
+                else if (a == A_BACK || a == A_SELECT || ((a == A_OK || a == A_RUN) && ops[opt] == OP_CANCEL)) mode = M_LIST;
+                else if (a == A_OK || a == A_RUN) {
+                    char lab[NAME_MAX_LEN * 2], np[1024], bn[64];
+                    snprintf(lab, sizeof lab, "%s", games[sel].label);
+                    if (ops[opt] == OP_MOVE) {
+                        build_dests(sel); mode = M_MOVE; opt = 0;
+                    } else if (ops[opt] == OP_RENAME) {
                         mode = M_KEYBOARD; kb_r = 0; kb_c = 0; kb_lower = 0;
+                        kb_for = games[sel].kind == K_DIR ? KB_FOR_FOLDER : KB_FOR_GAME;
                         snprintf(kb_text, sizeof kb_text, "%s",
-                                 strncmp(games[sel].label, "Unknown HuCard", 14) ? games[sel].label : "");
-                    } else if (opt == 1) {
+                                 strncmp(games[sel].label, "Unknown ", 8) ? games[sel].label : "");
+                    } else if (ops[opt] == OP_DELETE) {
                         mode = M_DELETE; opt = 1;   /* default: No */
+                    } else if (ops[opt] == OP_SGX || ops[opt] == OP_HUCARD) {
+                        int to = ops[opt] == OP_SGX;
+                        if (set_kind(sel, to, np, sizeof np) == 0) {
+                            snprintf(msg, sizeof msg, to ? "\"%s\" will run as SuperGrafx" : "\"%s\" will run as a HuCard", lab);
+                            scan_library();
+                            if ((i = find_game(np)) >= 0) sel = i;
+                        } else snprintf(msg, sizeof msg, "Could not change \"%s\"", lab);
+                        mode = M_MESSAGE; msg_until = now + 2500;
+                    } else if (ops[opt] == OP_BIOS) {
+                        if (use_as_bios(sel, bn, sizeof bn) == 0) snprintf(msg, sizeof msg, "Saved as CD System Card (bios/%s)", bn);
+                        else snprintf(msg, sizeof msg, "Could not save \"%s\" as a System Card", lab);
+                        scan_library();
+                        if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
+                        mode = M_MESSAGE; msg_until = now + 3000;
                     }
                 }
             } else if (mode == M_DELETE) {
@@ -1616,10 +2769,14 @@ int main(int argc, char **argv)
                 else if (a == A_OK || a == A_RUN) {
                     char lab[NAME_MAX_LEN * 2];
                     snprintf(lab, sizeof lab, "%s", games[sel].label);
-                    if (delete_game(sel) == 0) snprintf(msg, sizeof msg, "Deleted \"%s\"", lab);
+                    if (games[sel].kind == K_DIR) {
+                        if (rmdir(games[sel].path) == 0) snprintf(msg, sizeof msg, "Deleted the folder \"%s\"", lab);
+                        else snprintf(msg, sizeof msg, "Only an empty folder can be deleted");
+                    } else if (delete_game(sel) == 0) snprintf(msg, sizeof msg, "Deleted \"%s\"", lab);
                     else snprintf(msg, sizeof msg, "Could not delete \"%s\"", lab);
                     scan_library();
                     if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
                     mode = M_MESSAGE; msg_until = now + 2000;
                 }
             } else if (mode == M_KEYBOARD) {
@@ -1654,6 +2811,31 @@ int main(int argc, char **argv)
                     while ((len = strlen(kb_text)) && (kb_text[len - 1] == ' ' || kb_text[len - 1] == '.'))
                         kb_text[len - 1] = '\0';
                     if (!kb_text[0]) { snprintf(msg, sizeof msg, "The name cannot be empty"); }
+                    else if (kb_for == KB_FOR_NEWFOLDER) {       /* Move to... > New folder */
+                        char safe[NAME_MAX_LEN + 1], nd[1200], np[1200];
+                        int r;
+                        safe_file(kb_text, safe, sizeof safe);
+                        snprintf(nd, sizeof nd, "%s/%s/%s", lib_dir, tab_name[games[sel].tab], safe);
+                        if (exists(nd) && !has_disc(nd)) r = move_game(sel, nd, np, sizeof np);
+                        else if (exists(nd)) r = -2;
+                        else r = mkdir(nd, 0755) == 0 ? move_game(sel, nd, np, sizeof np) : -1;
+                        if (!r) snprintf(msg, sizeof msg, "Moved to the new folder \"%s\"", safe);
+                        else snprintf(msg, sizeof msg, "Could not move it to \"%s\"", safe);
+                        scan_library();
+                        if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
+                    } else if (kb_for == KB_FOR_FOLDER) {        /* rename a folder of your own */
+                        char safe[NAME_MAX_LEN + 1], nd[1200];
+                        const char *sl = strrchr(games[sel].path, '/');
+                        safe_file(kb_text, safe, sizeof safe);
+                        snprintf(nd, sizeof nd, "%.*s/%s", (int)(sl - games[sel].path), games[sel].path, safe);
+                        if (exists(nd)) snprintf(msg, sizeof msg, "\"%s\" already exists", safe);
+                        else if (rename(games[sel].path, nd) == 0) {
+                            snprintf(msg, sizeof msg, "Folder renamed to \"%s\"", safe);
+                            sync(); scan_library();
+                            if ((i = find_game(nd)) >= 0) sel = i;
+                        } else snprintf(msg, sizeof msg, "Rename failed (%s)", strerror(errno));
+                    }
                     else if (!strcmp(kb_text, games[sel].label)) { mode = M_LIST; continue; }
                     else if ((r = rename_game(sel, kb_text, newpath, sizeof newpath)) == 0) {
                         snprintf(msg, sizeof msg, "Renamed to \"%s\"", kb_text);
@@ -1667,6 +2849,22 @@ int main(int argc, char **argv)
             }
         }
         if (mode == M_MESSAGE && now >= msg_until && !shot) { mode = M_LIST; dirty = 1; }
+        {   /* hardware check every 2 s */
+            static Uint32 hw_next;
+            if (now >= hw_next) {
+                hw_next = now + 2000;
+                if (hw_check()) dirty = 1;
+                if (cd_check() | usb_check()) {  /* disc or USB stick in or out: list it */
+                    char keep[1024];
+                    snprintf(keep, sizeof keep, "%s", sel < ngames ? games[sel].path : "");
+                    scan_library();
+                    for (i = 0; i < ngames; i++) if (!strcmp(games[i].path, keep)) { sel = i; break; }
+                    if (sel >= ngames) sel = ngames - 1;
+                    if (sel < 0) sel = 0;
+                    dirty = 1;
+                }
+            }
+        }
 
         if (now - last_cart > 500) {
             unsigned long cs = cart_state();
@@ -1685,43 +2883,78 @@ int main(int argc, char **argv)
         if (bg) { SDL_RenderCopy(ren, bg, NULL, NULL); fill(0, 0, W, H, 0, 0, 0, 90); }
 
         {
-            int eh = TTF_FontHeight(f_title), ew = draw_img(tex_emblem, list_x, H * 6 / 100, eh, 0);
-            text(f_title, "Game Library", white, list_x + (ew ? ew + W / 80 : 0), H * 6 / 100, 0);
+            int eh = TTF_FontHeight(f_title), ew = draw_img(tex_emblem, list_x, H * 3 / 100, eh, 0), t, x = list_x;
+            text(f_title, "Game Library", white, list_x + (ew ? ew + W / 80 : 0), H * 3 / 100, 0);
+            char labs[T_N][48];
+            int tw[T_N], sum = 0, gap;
+            for (t = 0; t < T_N; t++) {
+                snprintf(labs[t], sizeof labs[t], t == T_RECENT || t == T_SET ? "%s" : "%s (%d)", tab_name[t], tab_count[t]);
+                tw[t] = 0; TTF_SizeUTF8(f_hint, labs[t], &tw[t], NULL); sum += tw[t];
+            }
+            gap = (list_w - sum) / (T_N - 1);           /* six tabs: spread over the list's width */
+            if (gap > W / 28) gap = W / 28;
+            if (gap < W / 80) gap = W / 80;
+            for (t = 0; t < T_N; t++) {                  /* tabs: Left/Right */
+                const char *lab = labs[t];
+                int w = tw[t];
+                if (t == cur_tab) fill(x - W / 160, H * 105 / 1000, w + W / 80, TTF_FontHeight(f_hint) + H / 100, accent.r, accent.g, accent.b, 255);
+                text(f_hint, lab, t == cur_tab ? ink : (tab_count[t] || t == T_SET ? white : dim), x, H * 11 / 100, 0);
+                x += w + gap;
+            }
         }
         {
             char cnt[64];
-            if (sel >= nreal) snprintf(cnt, sizeof cnt, "%d game%s", nreal, nreal == 1 ? "" : "s");
-            else snprintf(cnt, sizeof cnt, "%d of %d", sel + 1, nreal);
-            text(f_hint, cnt, dim, list_x + list_w, H * 9 / 100, 2);
+            if (!REAL(sel)) snprintf(cnt, sizeof cnt, "%d game%s", nreal, nreal == 1 ? "" : "s");
+            else snprintf(cnt, sizeof cnt, "%d of %d", sel - npin + 1, nreal);
+            if (cur_folder[0]) {
+                char c2[128];
+                snprintf(c2, sizeof c2, "%s  -  %s", cur_folder, cnt);
+                snprintf(cnt, sizeof cnt, "%.63s", c2);
+            }
+            if (cur_tab != T_SET) text(f_hint, cnt, dim, list_x + list_w, H * 5 / 100, 2);
         }
         fill(list_x, H * 17 / 100, list_w, H / 240 + 1, accent.r, accent.g, accent.b, 255);
 
-        if (!nreal) {
-            text(f_item, "No games in the library yet.", white, W / 2, H * 45 / 100, 1);
-            text(f_hint, "Insert a HuCard to dump it, or copy .pce files", dim, W / 2, H * 55 / 100, 1);
-            text(f_hint, "into the \"games\" folder on the SD card.", dim, W / 2, H * 60 / 100, 1);
+        if (!nreal && cur_tab != T_SET) {
+            const char *m = cur_tab == T_RECENT ? "The games you play appear here." : !ntotal
+                ? "No games yet: insert a HuCard, or copy games (.pce .sgx .cue .chd) into \"games\" on the SD card."
+                : "No games in this tab.";
+            text(f_hint, m, dim, W / 2, H * 81 / 100, 1);
         }
         for (i = 0; i < rows && top + i < ngames; i++) {
             Game *g = &games[top + i];
             int y = list_y + i * row_h;
             if (!g->tex) {
-                SDL_Surface *sf = TTF_RenderUTF8_Blended(f_item, g->label, top + i >= nreal ? accent : white);
+                SDL_Surface *sf = TTF_RenderUTF8_Blended(f_item, g->label, !REAL(top + i) ? accent : white);
                 if (sf) { g->tex = SDL_CreateTextureFromSurface(ren, sf); g->tw = sf->w; g->th = sf->h; SDL_FreeSurface(sf); }
             }
             if (top + i == sel) {
                 fill(list_x - W / 80, y, list_w + W / 40, row_h - 4, 255, 255, 255, 40);
                 fill(list_x - W / 80, y, W / 200 + 2, row_h - 4, accent.r, accent.g, accent.b, 255);
             }
-            if (g->recent)
-                text(f_hint, "Recent", dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
-            if (top + i > 0 && top + i < nreal && !g->recent && games[top + i - 1].recent)
-                fill(list_x, y - 2, list_w, 1, 255, 255, 255, 60);      /* end of the recent block */
+            if (REAL(top + i) && g->kind == K_DIR)
+                text(f_hint, "Folder", dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+            else if (REAL(top + i) && ((cur_tab == T_RECENT && g->kind != K_HUCARD) || g->check == C_MOD || (dbg_val[D_CRC] && g->crc[0]))) {
+                static const char *kn[] = { "", "SGX", "CD", "" };
+                char tag[64];
+                const char *first = dbg_val[D_CRC] && g->crc[0] ? g->crc : g->check == C_MOD ? "Modified?" : "";
+                const char *kind = cur_tab == T_RECENT ? kn[g->kind] : "";      /* the tab says it elsewhere */
+                snprintf(tag, sizeof tag, "%s%s%s", first, *first && *kind ? "  " : "", kind);
+                text(f_hint, tag, g->check == C_MOD ? c_mod : dim, list_x + list_w, y + (row_h - 4 - TTF_FontHeight(f_hint)) / 2, 2);
+            }
+            if (top + i > 0 && (top + i == npin || top + i == npin + nreal))
+                fill(list_x, y - 2, list_w, 1, 255, 255, 255, 60);      /* pinned / games / system entries */
             if (g->tex) {
                 SDL_Rect dst = { list_x + W / 60, y + (row_h - 4 - g->th) / 2, g->tw, g->th };
                 SDL_Rect src;
-                if (dst.w > list_w - W / 30 - (g->recent ? W / 10 : 0)) dst.w = list_w - W / 30 - (g->recent ? W / 10 : 0);
+                int tagw = (cur_tab == T_RECENT && g->kind ? W / 20 : 0) + (g->check == C_MOD || (dbg_val[D_CRC] && g->crc[0]) ? W / 8 : 0);
+                if (dst.w > list_w - W / 30 - tagw) dst.w = list_w - W / 30 - tagw;
                 src.x = 0; src.y = 0; src.w = dst.w; src.h = g->th;
                 SDL_SetTextureAlphaMod(g->tex, top + i == sel ? 255 : 190);
+                if (REAL(top + i)) {          /* green: matches the database, amber: modified?, grey: unknown */
+                    SDL_Color c = g->kind == K_DIR ? white : g->check == C_OK ? c_ok : g->check == C_MOD ? c_mod : c_unk;
+                    SDL_SetTextureColorMod(g->tex, c.r, c.g, c.b);
+                }
                 SDL_RenderCopy(ren, g->tex, &src, &dst);
             }
         }
@@ -1732,15 +2965,46 @@ int main(int argc, char **argv)
             fill(list_x + list_w + W / 40, list_y, W / 320 + 1, track_h, 255, 255, 255, 50);
             fill(list_x + list_w + W / 40, bar_y, W / 320 + 1, bar_h, accent.r, accent.g, accent.b, 255);
         }
-        text(f_hint, sel >= nreal ? (!strcmp(games[sel].path, "__CART__") ? "I / RUN  Play the HuCard that is in the slot"
+        if (!ngames) text(f_hint, "Left/Right  Tabs", dim, W / 2, H * 91 / 100, 1);
+        else text(f_hint, !REAL(sel) ? (!strcmp(games[sel].path, "__CART__") ? "I / RUN  Play the HuCard that is in the slot"
+                                   : !strcmp(games[sel].path, "__RIPCD__") ? "I / RUN  Copy the CD to the SD card (first time only) and play it"
+                                   : !strcmp(games[sel].path, "__USB__") ? "I / RUN  Copy games and saves from or to the USB stick"
                                    : !strcmp(games[sel].path, "__PADTEST__") ? "I / RUN  Check that every button works"
                                    : !strcmp(games[sel].path, "__ABOUT__") ? "I / RUN  Version and card space"
+                                   : !strcmp(games[sel].path, "__REPORT__") ? (usb_dev[0] ? "I / RUN  Logs in one .zip, saved to the USB stick (no games or saves)"
+                                                                                       : "I / RUN  Logs in one .zip, saved to the logs folder on the SD card")
                                    : !strcmp(games[sel].path, "__RETROARCH__") ? "I / RUN  The full RetroArch menu (advanced)"
                                    : "I / RUN  Restart the console")
-                                  : "I / RUN  Play       SELECT  Rename / Delete       Left/Right  Page",
+                                  : games[sel].check == C_MOD ? "Doesn't match the known copy: a hack, a revision or a bad read. Re-insert the HuCard to check"
+                                  : games[sel].kind == K_DIR ? "I  Open folder       SELECT  Rename / delete       Left/Right  Tabs"
+                                  : cur_folder[0] ? "I / RUN  Play       SELECT  Game options       II  Back"
+                                  : "I / RUN  Play       SELECT  Game options       Left/Right  Tabs",
              dim, W / 2, H * 91 / 100, 1);
 
+        if (hw_warning()) text(f_hint, hw_warning(), red, W / 2, H * 86 / 100, 1);
         if (mode == M_ABOUT) draw_about();
+        if (mode == M_DEBUG) draw_debug(opt);
+        if (mode == M_MOVE) {
+            int pw = W * 56 / 100, ph = row_h * (ndest + 2), px, py;
+            panel(pw, ph, &px, &py);
+            text(f_hint, "Move to...", dim, px + pw / 2, py + row_h / 3, 1);
+            for (i = 0; i < ndest; i++) {
+                int y = py + row_h * (i + 1) + row_h / 4;
+                if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
+                text(f_item, dest_name[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+            }
+        }
+        if (mode == M_USB) {
+            static const char *items[] = { "Import games and saves from the stick", "Export games and saves to the stick", "Export a bug report", "Cancel" };
+            int pw = W * 56 / 100, ph = row_h * 6, px, py;
+            panel(pw, ph, &px, &py);
+            text(f_hint, "USB stick (FAT32)", dim, px + pw / 2, py + row_h / 3, 1);
+            for (i = 0; i < 4; i++) {
+                int y = py + row_h * (i + 1) + row_h / 4;
+                if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
+                text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+            }
+        }
         if (mode == M_PLAY) {
             static const char *items[] = { "Resume last save", "Start new game", "Cancel" };
             int pw = W * 40 / 100, ph = row_h * 5, px, py;
@@ -1752,14 +3016,14 @@ int main(int argc, char **argv)
                 text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
             }
         } else if (mode == M_OPTIONS) {
-            static const char *items[] = { "Rename", "Delete", "Cancel" };
-            int pw = W * 40 / 100, ph = row_h * 5, px, py;
+            int ops[7], nops = game_ops(sel, ops, (const char **)opnames);
+            int pw = W * 46 / 100, ph = row_h * (nops + 2), px, py;
             panel(pw, ph, &px, &py);
             text(f_hint, games[sel].label, dim, px + pw / 2, py + row_h / 3, 1);
-            for (i = 0; i < 3; i++) {
+            for (i = 0; i < nops; i++) {
                 int y = py + row_h * (i + 1) + row_h / 4;
                 if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
-                text(f_item, items[i], i == 1 ? red : white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+                text(f_item, opnames[i], ops[i] == OP_DELETE ? red : white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
             }
         } else if (mode == M_DELETE) {
             int pw = W * 60 / 100, ph = row_h * 9 / 2, px, py, bw = pw / 4;
@@ -1798,13 +3062,24 @@ int main(int argc, char **argv)
                 }
             }
             text(f_hint, "I  Type      II  Erase      RUN  Done      SELECT  Cancel", dim, px + pw / 2, py + ph - row_h * 3 / 4, 1);
+        } else if (mode == M_ASK) {
+            static const char *items[] = { "Play as PC Engine", "Play as SuperGrafx", "Use as CD System Card", "Not now" };
+            int pw = W * 56 / 100, ph = row_h * 7, px, py;
+            panel(pw, ph, &px, &py);
+            text(f_item, "New HuCard, not in the game database", white, px + pw / 2, py + row_h / 4, 1);
+            text(f_hint, "How should it run? (SELECT changes it later)", dim, px + pw / 2, py + row_h, 1);
+            for (i = 0; i < 4; i++) {
+                int y = py + row_h * (i + 2) + row_h / 4;
+                if (i == opt) fill(px + W / 60, y, pw - W / 30, row_h - 6, 255, 255, 255, 40);
+                text(f_item, items[i], white, px + pw / 2, y + (row_h - 6 - TTF_FontHeight(f_item)) / 2, 1);
+            }
         } else if (mode == M_MESSAGE) {
             int pw = W * 60 / 100, ph = row_h * 2, px, py;
             panel(pw, ph, &px, &py);
             text(f_item, msg, white, px + pw / 2, py + (ph - TTF_FontHeight(f_item)) / 2, 1);
         }
 
-        if (shot && qhead == qtail) {
+        if (shot && qhead == qtail && !rep_dir) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
             if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0)
                 SDL_SaveBMP(ss, shot);
