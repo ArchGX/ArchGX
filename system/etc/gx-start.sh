@@ -287,7 +287,22 @@ sort_root() {
 			rmdir "$f" 2>/dev/null && log "library: removed the empty folder $(basename "$f")"
 		fi
 	done
+	unwrap_cds
 	[ $sn -gt 0 ] && { sync; log "library: moved $sn game(s) into their tabs"; }
+}
+# A CD unpacked from a zip often sits in a folder of the same name
+# ("Strider/Strider/Strider.cue"): the inner folder moves up one level, so
+# the game shows directly in CD Games. Folders with another name are yours
+# and stay as they are.
+unwrap_cds() {
+	for w in "$F_CD"/*/ "$F_CD"/*/*/; do
+		w=${w%/}; [ -d "$w" ] || continue
+		is_disc_dir "$w" && continue
+		set -- "$w"/*
+		[ $# = 1 ] && [ -d "$1" ] && is_disc_dir "$1" || continue
+		[ "$(basename "$1" | tr 'A-Z' 'a-z')" = "$(basename "$w" | tr 'A-Z' 'a-z')" ] || continue
+		mv "$1" "$w.unwrap" && rmdir "$w" && mv "$w.unwrap" "$w" && sync && log "library: unwrapped CD folder $(basename "$w")"
+	done
 }
 
 safe_name() { echo "$1" | sed 's#[\\/:*?"<>|]#-#g; s/[. ]*$//'; }

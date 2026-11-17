@@ -1,8 +1,9 @@
 # Changelog
 
-## GP2-beta14: hold to scroll
+## GP2-beta14: hold to scroll, tidier CD folders
 
 - **Hold the d-pad to scroll:** holding Up or Down repeats after half a second (about 12 rows a second), then speeds up after 2 seconds (about 30 a second). Works in the game library, the USB import/export pickers, Move to…, the menus, the in-game menu and the keyboard (all four directions there). Left/Right in lists stays one step per press, so you don't fly past tabs or out of folders. The old repeat lost track on pads that report the d-pad as axes (the console's own pads), and the USB pickers had none.
+- **Zip-style CD folders unwrapped:** a CD in a folder of the same name (`Strider/Strider/Strider.cue`, as many downloads unpack) is moved up one level at start-up and after an import, so it shows directly in CD Games. Folders with other names are left as they are.
 
 ## GP2-beta13: back where you left off, smarter sorting
 
