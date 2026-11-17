@@ -47,7 +47,9 @@ To use copies you've already downloaded, set `SDL_SRC`, `SDL_IMAGE_SRC`, `SDL_TT
 scripts/build.sh sysroot stock-rootfs build
 ```
 
-It clones RetroArch v1.7.4 (commit `02e23be`), applies the patch, configures it from `retroarch/config.mk.in` and `retroarch/config.h`, and builds everything. Set `RA_SRC=<checkout>` to reuse an existing clone.
+It clones RetroArch v1.7.4 (commit `02e23be`), applies the patch, configures it from `retroarch/config.mk.in` and `retroarch/config.h`, and builds everything. It also clones Beetle SuperGrafx (commit `9c11dcd`) and builds it unmodified with `HAVE_CDROM=0`. Set `RA_SRC=<checkout>` and `SGX_SRC=<checkout>` to reuse existing clones.
+
+`scripts/make-source-archives.sh` packs the exact source of both, plus ArchGX itself, for attaching to a release.
 
 The result is `build/payload/`: the files the installer adds to the console. The build checks that every binary needs nothing newer than glibc 2.26.
 

@@ -11,6 +11,12 @@ Two CSV files are searched; your own entries win over the built-in ones:
 | `gamedb.csv` | `/usr/share/archgx/` on the console (from `system/share/gamedb.csv`) | ArchGX releases |
 | `gamedb-local.csv` | the card's large partition | You. Naming an unknown cart on the console adds a line |
 
+## Where the built-in entries come from
+
+- **472 entries** (CRC32, header bytes and title) were read from the game table in the console's stock HuCard loader (`tgdumper-loading`), when ArchGX replaced that loader. They are factual identifiers: checksums, 8 bytes of each game's own ROM, and game names.
+- The rest were added by ArchGX: games identified on real carts during testing, hacks and translations, and header signatures measured from our own dumps.
+- **Planned for GP3:** a new database built only from independent sources (an openly licensed checksum/title list and checksums and headers measured from carts and dumps we own), so that no entry depends on the stock loader's table.
+
 ## Format
 
 ```

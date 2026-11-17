@@ -23,8 +23,8 @@
 |---|---|---|
 | `uboot`, `trust`, `boot` | Bootloader, OP-TEE, kernel | untouched |
 | `rootfs` | Read-only SquashFS system | **the only partition the installer changes** |
-| `userdata` | ext2: RetroArch settings | untouched |
-| `gb_rom` | FAT: games and saves | untouched by the installer; enlarged on first start if still stock-sized |
+| `userdata` | ext2: RetroArch settings | untouched by the installer; written to while running (see below) |
+| `gb_rom` | FAT: games and saves | untouched by the installer; enlarged on first start if still stock-sized; named RETRONGX if it has no name |
 
 ## What ArchGX changes in the system partition
 
@@ -34,19 +34,22 @@ Both installers do the same:
 
 Each reads the user's own stock SquashFS from the card, then:
 
-1. **Adds the ArchGX payload**:
-   - `/etc/gx-start.sh`, `/etc/gx-reset.sh` and `/etc/fix_storage.sh`;
-   - the RetroArch config fragments `/etc/gx-*.cfg`;
-   - `/etc/archgx-release`;
-   - `/usr/bin/pce-launcher` and `/usr/bin/pce-normalize`;
-   - `/usr/bin/retroarch` (our build, replacing Hyperkin's);
-   - video filters in `/usr/lib/retroarch/filters/video/`;
-   - the game database and artwork in `/usr/share/archgx/`.
+1. **Adds the ArchGX payload** (all ArchGX's own files or built from public source; nothing taken from the stock image):
+   - scripts: `/etc/gx-start.sh` (supervisor), `/etc/gx-reset.sh` (RESET button), `/etc/fix_storage.sh` (storage partition repair);
+   - RetroArch config fragments `/etc/gx-retroarch.cfg`, `/etc/gx-retroarch-advanced.cfg`, `/etc/gx-resume.cfg` (applied with `--appendconfig`; the stock config files are not changed by the installer);
+   - `/etc/archgx-release` (version);
+   - ArchGX programs in `/usr/bin/`: `pce-launcher` (library, progress screens, in-game menu, USB pickers), `pce-normalize` (cart dump cleanup and identification helpers), `cd-rip` (copies a CD from a USB drive), `fat-label` (names the card), `zipit` (bug-report zips);
+   - `/usr/bin/retroarch`: RetroArch 1.7.4 built from source with our patch, **replacing Hyperkin's RetroArch binary** (the stock one is overwritten in the new system partition; the backup keeps it);
+   - `/usr/lib/libretro/mednafen_supergrafx_libretro.so`: the Beetle SuperGrafx core, built unmodified from upstream;
+   - video filters in `/usr/lib/retroarch/filters/video/` (Scanlines, Blargg NTSC composite);
+   - in `/usr/share/archgx/`: artwork, the HuCard database `gamedb.csv` and the CD database `cddb.csv` (see [Game database](GAMEDB.md) for where the entries come from).
 2. **Edits three lines of stock configuration**:
    - `/etc/init.d/rcS` starts `/etc/gx-start.sh` instead of Hyperkin's `check_firmware` and no longer sources `check_dumper.sh`;
    - `/etc/input-event-daemon.conf` sends the RESET button (F3) to `gx-reset.sh`;
    - `/etc/usbmount/usbmount.conf` turns automatic USB mounting off, because ArchGX mounts the reader itself, read-only.
-3. **Switches off Hyperkin's launcher programs** (mode 000, not deleted): `check_firmware`, `tgdumper-loading`, `menu`, `bte_fw_update_andrew` and their helper scripts.
+3. **Switches off Hyperkin's launcher programs** (mode 000, not deleted): `check_firmware`, `tgdumper-loading`, `menu`, `bte_fw_update_andrew`, and the scripts `check_dumper.sh`, `firmware_update.sh`, `partition_resize.sh`, `reset-btn.sh`, `start_tgdumper.sh` and the three `usbmount` RetroArch hooks.
+
+**What the installer does not do:** no binary patches (no stock program is edited byte by byte), no changes to the boot chain, kernel or other partitions, and no Hyperkin files are copied into the release. The stock system partition is backed up first (`archgx-stock-rootfs.img`) and `restore` puts it back byte for byte.
 
 Everything else is the console's own: boot chain, kernel, Mali driver, Weston, SDL2, PulseAudio, the Beetle PCE Fast core and the fonts.
 
@@ -87,6 +90,20 @@ rcS ─► Weston ─► gx-start.sh ─┬─► pce-launcher           (Game L
 - Options are stored in `archgx-settings.cfg` on the card.
 - When you leave the Options screen, the menu writes `/tmp/gx/ra-set`, which the RetroArch patch applies live. Applying once per visit matters: several video re-inits in quick succession crashed RetroArch on this driver.
 - At launch, `gx-start.sh` writes the same settings as an appended RetroArch config.
+
+## What ArchGX changes while it runs
+
+Besides `games/`, `saves/` and its own files on the card, ArchGX writes to a few stock places at run time:
+
+| Where | What | Why |
+|---|---|---|
+| `gb_rom` partition | Enlarged or recreated by `fix_storage.sh` on first start if still stock-sized (files are kept); named `RETRONGX` by `fat-label` if it has no name | The stock resize deleted this partition on large cards |
+| `/userdata/retroarch/retroarch-core-options.cfg` | Before each game: `pce_disable_softreset`, `sgx_disable_softreset`, `sgx_forcesgx`, the CD BIOS choice, sprite limit and palette options | RUN+SELECT is the menu combo, not a soft reset; Options-menu choices |
+| `/userdata/retroarch_org/` (stock persistent copy of the RetroArch settings) | After each game, settings changed in RetroArch's own menu are copied back; a `.stock` copy is kept once. An empty `reset-retroarch-settings` file on the card restores the stock settings | So RetroArch menu changes survive a restart, as stock |
+| `/userdata/*.pce` | System Card files from `bios/` are copied where the cores look for them | CD games |
+| `/tmp/SelectGame.txt` | The game's title | Read by the console's own Beetle PCE Fast core, as with the stock launcher |
+
+ArchGX never writes to the HuCard reader (mounted read-only, no commands sent) or to a CD.
 
 ## The RetroArch patch
 
