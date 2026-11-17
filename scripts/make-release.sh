@@ -23,26 +23,31 @@ cp -a "$BUILD/payload" "$STAGE/payload"
 cp "$BUILD/payload.sha256" "$STAGE/payload.sha256"
 install -m 755 "$TOP/installer/archgx-install.sh" "$STAGE/installer/"
 cp "$TOP/LICENSE" "$TOP/THIRD_PARTY.md" "$TOP/CHANGELOG.md" "$STAGE/"
+cp -r "$TOP/LICENSES" "$STAGE/LICENSES"
+cp "$TOP/LICENSES/THIRD_PARTY_NOTICES.txt" "$DIST/THIRD_PARTY_NOTICES.txt"   # a release file of its own: covers the installer apps
 cp "$TOP/docs/INSTALL.md" "$STAGE/INSTALL.md"
 cp "$TOP/retroarch/0001-archgx-retron-gx.patch" "$STAGE/"
 cat > "$STAGE/SOURCE.txt" <<EOF
 ArchGX $V - corresponding source
 
-All ArchGX source code, build scripts and the RetroArch patch are published at
-  https://github.com/ArchGX/ArchGX   (tag $V)
+Attached to the GitHub release next to this archive:
+  archgx-$V-source.tar.gz                  ArchGX: our code, the RetroArch patch,
+                                             the glibc shim and the build scripts
+  retroarch-1.7.4-02e23be-source.tar.gz    RetroArch v1.7.4 as used, before our patch
+  beetle-supergrafx-9c11dcd-source.tar.gz  the SuperGrafx core, built unmodified
+Also at https://github.com/ArchGX/ArchGX (tag $V) and upstream:
+  https://github.com/libretro/RetroArch                 commit 02e23be127db29a72170d3c79bfd642288cd15ea
+  https://github.com/libretro/beetle-supergrafx-libretro commit 9c11dcd213a79d57d2c86313971631af801f2cdc
 
-The RetroArch binary in payload/usr/bin/retroarch and the video filters in
-payload/usr/lib/retroarch/filters/video/ are built from:
-  RetroArch v1.7.4 (commit 02e23be127db29a72170d3c79bfd642288cd15ea)
-  https://github.com/libretro/RetroArch
-plus 0001-archgx-retron-gx.patch (included here), with the build recipe in
-retroarch/ and scripts/build.sh of the ArchGX repository. RetroArch is GPL-3.0.
+payload/usr/bin/retroarch and payload/usr/lib/retroarch/filters/video/ are
+RetroArch plus 0001-archgx-retron-gx.patch (included here); RetroArch is GPL-3.0.
+payload/usr/lib/libretro/mednafen_supergrafx_libretro.so is the unmodified
+SuperGrafx core; it is GPL-2.0. How to rebuild both: docs/BUILDING.md and
+scripts/build.sh in the ArchGX source. Licence texts: LICENSES/.
 
-The Beetle SuperGrafx core in payload/usr/lib/libretro/ is built, unmodified,
-by scripts/build.sh from:
-  beetle-supergrafx-libretro (commit 9c11dcd213a79d57d2c86313971631af801f2cdc)
-  https://github.com/libretro/beetle-supergrafx-libretro
-It is GPL-2.0; see THIRD_PARTY.md.
+If any of this is ever unavailable, open an issue at
+https://github.com/ArchGX/ArchGX/issues and we will provide it. This offer is
+valid for at least three years after this release.
 EOF
 ( cd "$DIST" && tar --owner=0 --group=0 -czf "$NAME.tar.gz" "$NAME" )
 
@@ -62,6 +67,6 @@ for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64; do
 done
 rm -f "$APP/payload.tar.gz" "$APP/VERSION"
 
-( cd "$DIST" && sha256sum "$NAME.tar.gz" ArchGX-Installer-"$V"-* > SHA256SUMS )
+( cd "$DIST" && sha256sum "$NAME.tar.gz" ArchGX-Installer-"$V"-* THIRD_PARTY_NOTICES.txt $(ls *-source.tar.gz 2>/dev/null) > SHA256SUMS )
 echo "release files in $DIST:"
 cat "$DIST/SHA256SUMS"

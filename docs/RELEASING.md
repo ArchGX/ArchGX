@@ -17,11 +17,13 @@
    - first start (storage enlarged), library, insert a HuCard;
    - save/load/rewind/screenshot, options (all filters), aspect switch;
    - RESET button, pull a cart mid-game, RetroArch Menu, Controller test, About.
-6. `scripts/make-release.sh build dist` (needs Go).
+6. Commit, then `RA_SRC=<RetroArch clone> SGX_SRC=<core clone> scripts/make-source-archives.sh dist`, then `scripts/make-release.sh build dist` (needs Go).
 7. Test the installer app on a copy of a stock card image: `--image card.img`, then `--restore`. The restored image must be byte-identical. Also test it on a real card, on Windows if possible.
 8. Create the GitHub release on tag `<VERSION>` and upload:
    - the four `ArchGX-Installer-*` files;
    - `archgx-<VERSION>.tar.gz`;
+   - `THIRD_PARTY_NOTICES.txt`;
+   - the three `*-source.tar.gz` archives;
    - `SHA256SUMS`.
 
 ## Rules for every release
