@@ -1,5 +1,11 @@
 # Changelog
 
+## GP2.1: easier updates, a visible first start
+
+- **Update from any version in one go:** the installer now updates the ArchGX system on the card in place, so the stock backup is no longer needed to update (only to uninstall). Stock → GP2.1 and GP1 → GP2.1 both work directly, with no versions in between, and give exactly the same system. Clearer messages say what the backup is for.
+- **"Preparing your SD card" screen:** on the first start of a freshly flashed card, enlarging and formatting the storage partition used to happen behind the boot logo, which looked frozen on big cards. Each step now shows on screen; the disk tool answers every kind of question it can ask and is stopped if it ever waits; every step is logged to `logs/fix_storage-steps.log`, kept even if formatting fails.
+- The card now lists ArchGX's own files (`/etc/archgx-files`), so an update can remove files a newer version no longer ships.
+
 ## GP2: SuperGrafx, CD games, a library with tabs and folders, USB copies
 
 The big one. Everything below was built and tested over 14 betas; the beta entries further down have the details.

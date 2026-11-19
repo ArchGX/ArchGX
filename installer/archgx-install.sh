@@ -111,7 +111,7 @@ write_rootfs() {   # <squashfs image>
 
 # --- restore ---------------------------------------------------------------
 if [ "$CMD" = restore ]; then
-	[ -n "$STOCK" ] || die "restore needs --stock <stock rootfs backup>"
+	[ -n "$STOCK" ] || die "restore needs --stock archgx-stock-rootfs.img (saved by the first install). Without it, re-flash a stock card image instead (back up games/ and saves/ first)"
 	[ "$(sha256sum "$STOCK" | cut -d' ' -f1)" = "$STOCK_ROOTFS_SHA256" ] || die "$STOCK is not the stock rootfs"
 	confirm "Write the stock system partition back to $TARGET?"
 	write_rootfs "$STOCK"
@@ -139,9 +139,15 @@ case $CARD_STATE in
 			say "stock system partition backed up to $B (keep it: it undoes the install)"
 		fi ;;
 	archgx)
-		[ -n "$STOCK" ] || die "this card already runs ArchGX: give the stock backup with --stock archgx-stock-rootfs.img"
-		[ "$(sha256sum "$STOCK" | cut -d' ' -f1)" = "$STOCK_ROOTFS_SHA256" ] || die "$STOCK is not the stock rootfs"
-		BASE=$STOCK ;;
+		if [ -n "$STOCK" ]; then
+			[ "$(sha256sum "$STOCK" | cut -d' ' -f1)" = "$STOCK_ROOTFS_SHA256" ] || die "$STOCK is not the stock rootfs"
+			BASE=$STOCK
+		else
+			# update in place: the card's own ArchGX system is the starting point
+			say "no --stock backup given: updating the ArchGX system on the card in place"
+			say "(keep archgx-stock-rootfs.img from your first install if you might want to uninstall)"
+			BASE=$WORK/card-rootfs.img
+		fi ;;
 	*)
 		die "unknown system partition on $TARGET (sha256 $CARD_SHA). ArchGX only installs over the stock RubyMain-20250709 system." ;;
 esac
@@ -150,8 +156,15 @@ say "building $NEW_VERSION"
 unsquashfs -q -d "$WORK/root" "$BASE" >/dev/null
 R=$WORK/root
 
+# files a previous ArchGX shipped and this one doesn't (updates in place)
+if [ -f "$R/etc/archgx-files" ]; then
+	while read -r f; do
+		[ -n "$f" ] && [ "$f" != usr/bin/retroarch ] && [ ! -e "$PAYLOAD/$f" ] && [ ! -d "$R/$f" ] && rm -f "$R/$f"
+	done < "$R/etc/archgx-files"
+fi
 # our files (owned by root, existing directories keep their metadata)
 ( cd "$PAYLOAD" && tar cf - . ) | ( cd "$R" && tar xf - --no-same-owner --no-overwrite-dir )
+{ ( cd "$PAYLOAD" && find . \( -type f -o -type l \) | sed 's#^\./##' ); echo etc/archgx-files; } | sort > "$R/etc/archgx-files"
 
 # start ArchGX instead of Hyperkin's launcher
 sed -i -e '/^[[:space:]]*source \/etc\/check_dumper\.sh[[:space:]]*$/d' \

@@ -16,6 +16,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -134,12 +135,81 @@ func editFile(root *Node, p string, edit func(string) string, check func(string)
 	return nil
 }
 
-// convert applies every ArchGX change to the stock tree.
+// manifestPath lists the payload's files on the card, so that a later
+// in-place update can remove files a newer version no longer ships.
+const manifestPath = "etc/archgx-files"
+
+// payloadFiles lists the regular files and symlinks in a payload .tar.gz.
+func payloadFiles(payloadTarGz []byte) (map[string]bool, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(payloadTarGz))
+	if err != nil {
+		return nil, err
+	}
+	tr := tar.NewReader(zr)
+	files := map[string]bool{}
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return files, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeSymlink {
+			files[strings.TrimPrefix(path.Clean("/"+h.Name), "/")] = true
+		}
+	}
+}
+
+func removeFile(root *Node, p string) bool {
+	dir, base := path.Split(p)
+	parent := lookup(root, dir)
+	if parent == nil || parent.Type != tDir {
+		return false
+	}
+	for i, c := range parent.Children {
+		if c.Name == base && c.Type != tDir {
+			parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// convert applies every ArchGX change to the stock tree, or updates a tree
+// that already runs ArchGX in place: every step below can be repeated.
 func convert(root *Node, payload []byte) (string, error) {
+	files, err := payloadFiles(payload)
+	if err != nil {
+		return "", err
+	}
+	// files the previous ArchGX shipped and this one doesn't (never a stock
+	// file: retroarch replaced Hyperkin's and is always in the payload)
+	if old := lookup(root, manifestPath); old != nil && old.Type == tFile {
+		for _, f := range strings.Split(string(old.Data), "\n") {
+			f = strings.TrimSpace(f)
+			if f != "" && !files[f] && f != "usr/bin/retroarch" {
+				removeFile(root, f)
+			}
+		}
+	}
 	version, err := addPayload(root, payload)
 	if err != nil {
 		return "", err
 	}
+	list := make([]string, 0, len(files)+1)
+	for f := range files {
+		list = append(list, f)
+	}
+	list = append(list, manifestPath)
+	sort.Strings(list)
+	m := lookup(mkdirAll(root, "etc", 0), "archgx-files")
+	if m == nil {
+		m = &Node{Name: "archgx-files"}
+		e := lookup(root, "etc")
+		e.Children = append(e.Children, m)
+	}
+	*m = Node{Name: "archgx-files", Type: tFile, Mode: 0644, Mtime: lookup(root, "etc/archgx-release").Mtime, Data: []byte(strings.Join(list, "\n") + "\n")}
 	dropDumper := regexp.MustCompile(`(?m)^[ \t]*source /etc/check_dumper\.sh[ \t]*\n`)
 	if err := editFile(root, "etc/init.d/rcS", func(s string) string {
 		s = dropDumper.ReplaceAllString(s, "")
