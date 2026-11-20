@@ -68,7 +68,7 @@ typedef struct { char *path; char *label; SDL_Texture *tex; int tw, th; int rece
  * games outside them go to the tab of their kind. Recent: the 5 last played. */
 enum { T_RECENT, T_PCE, T_TG, T_SGX, T_CD, T_SET, T_N };   /* T_SET: Settings, no games */
 static const char *tab_name[T_N] = { "Recent", "PC Engine", "TurboGrafx-16", "SuperGrafx", "CD Games", "Settings" };
-#define ARCHGX_VERSION "GP2.1"
+#define ARCHGX_VERSION "GP2.2"
 #define LOGO_PATH "/usr/share/archgx/logo.png"
 #define EMBLEM_PATH "/usr/share/archgx/emblem.png"
 #define MAX_RECENT 5
@@ -981,8 +981,13 @@ static PadMap lookup_pad(const char *name, int vid, int pid)
 }
 
 #define MAX_PADS 8
-static struct { SDL_JoystickID id; PadMap map; } pads[MAX_PADS];
+/* trusted: the d-pad has been seen centred since the pad appeared. Some cart
+ * readers report an EMPTY controller port as Up held forever (GitHub #5); such
+ * a "pad" is never centred, so its directions are ignored. fake: test hook. */
+static struct { SDL_JoystickID id; PadMap map; int trusted, fake; } pads[MAX_PADS];
 static int npads;
+static int pad_trusted(SDL_JoystickID id);
+static void dir_event(SDL_JoystickID id, int d);
 
 static void add_pad(int index)
 {
@@ -992,6 +997,7 @@ static void add_pad(int index)
     for (i = 0; i < npads; i++) if (pads[i].id == id) return;
     if (npads >= MAX_PADS || !(j = SDL_JoystickOpen(index))) return;
     pads[npads].id = SDL_JoystickInstanceID(j);
+    pads[npads].trusted = 0; pads[npads].fake = 0;
     pads[npads].map = lookup_pad(SDL_JoystickName(j), SDL_JoystickGetVendor(j), SDL_JoystickGetProduct(j));
     SDL_Log("pad %d: \"%s\" %04x:%04x I=%d II=%d run=%d select=%d", npads, SDL_JoystickName(j),
             SDL_JoystickGetVendor(j), SDL_JoystickGetProduct(j),
@@ -1765,7 +1771,7 @@ static int ig_menu(const char *title)
                     int v = ev.jhat.value, d = A_NONE;
                     if (v & SDL_HAT_UP) d = A_UP; else if (v & SDL_HAT_DOWN) d = A_DOWN;
                     else if (v & SDL_HAT_LEFT) d = A_LEFT; else if (v & SDL_HAT_RIGHT) d = A_RIGHT;
-                    held = d; push(d); repeat_at = SDL_GetTicks() + 400;
+                    held = d; dir_event(ev.jhat.which, d); repeat_at = SDL_GetTicks() + 400;
                     break; }
                 case SDL_JOYBUTTONDOWN: {
                     PadMap *m = pad_map(ev.jbutton.which);
@@ -2149,6 +2155,50 @@ static int pad_dir(SDL_Joystick *j, int which)      /* 0 up, 1 down, 2 left, 3 r
 
 static int pad_btn(SDL_Joystick *j, int b) { return b >= 0 && SDL_JoystickGetButton(j, b); }
 
+/* direction w held on pads[k] (the fake test pad holds Up forever) */
+static int pad_dir_k(int k, int w)
+{
+    SDL_Joystick *j;
+    if (pads[k].fake) {                            /* "stuck": Up forever; "press:<ms>": centred, then Up */
+        const char *f = getenv("PCE_LAUNCHER_FAKEPAD");
+        int from = f && !strncmp(f, "press:", 6) ? atoi(f + 6) : 0;          /* "press:<from>:<to>" */
+        int to = f && strchr(f + 6, ':') ? atoi(strchr(f + 6, ':') + 1) : 1 << 30;
+        return w == 0 && (int)SDL_GetTicks() >= from && (int)SDL_GetTicks() < to;
+    }
+    j = SDL_JoystickFromInstanceID(pads[k].id);
+    return j && pad_dir(j, w);
+}
+static int pad_trusted_k(int k)
+{
+    if (!pads[k].trusted && !pad_dir_k(k, 0) && !pad_dir_k(k, 1) && !pad_dir_k(k, 2) && !pad_dir_k(k, 3)) {
+        pads[k].trusted = 1;
+        SDL_Log("pad %d: d-pad centred, now used", k);
+    }
+    return pads[k].trusted;
+}
+static int pad_trusted(SDL_JoystickID id)
+{
+    int k;
+    for (k = 0; k < npads; k++) if (pads[k].id == id) return pad_trusted_k(k);
+    return 1;
+}
+/* a d-pad press from a pad's event: ignored until that pad has been centred */
+static void dir_event(SDL_JoystickID id, int d)
+{
+    if (d && pad_trusted(id)) push(d);
+}
+/* test hook PCE_LAUNCHER_FAKEPAD=1: a pad stuck on Up, like an empty port on
+ * some cart readers; it also sends the one press event such a port sends */
+static void fake_pad(void)
+{
+    if (!getenv("PCE_LAUNCHER_FAKEPAD") || npads >= MAX_PADS) return;
+    pads[npads].id = -2; pads[npads].fake = 1; pads[npads].trusted = 0;
+    pads[npads].map.a = pads[npads].map.b = pads[npads].map.start = pads[npads].map.select = -1;
+    SDL_Log("pad %d: fake pad stuck on Up (test)", npads);
+    npads++;
+    dir_event(-2, A_UP);
+}
+
 /* Holding the d-pad repeats: the direction actually held is read from every
  * pad each frame (some pads report the d-pad as a hat, others as axes, and
  * events alone lose track). First press comes from the event; after 0.45 s
@@ -2166,9 +2216,8 @@ static int held_dir(int lr)
         return A_NONE;
     }
     for (i = 0; i < npads; i++) {
-        SDL_Joystick *j = SDL_JoystickFromInstanceID(pads[i].id);
-        if (!j) continue;
-        for (w = 0; w < (lr ? 4 : 2); w++) if (pad_dir(j, w)) return act[w];
+        if (!pad_trusted_k(i)) continue;                 /* an empty port stuck on a direction */
+        for (w = 0; w < (lr ? 4 : 2); w++) if (pad_dir_k(i, w)) return act[w];
     }
     return A_NONE;
 }
@@ -2273,10 +2322,10 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
             if (ev.type == SDL_JOYDEVICEADDED) add_pad(ev.jdevice.which);
             if (ev.type == SDL_JOYHATMOTION) {
                 int v = ev.jhat.value;
-                push(v & SDL_HAT_UP ? A_UP : v & SDL_HAT_DOWN ? A_DOWN : v & SDL_HAT_LEFT ? A_LEFT : v & SDL_HAT_RIGHT ? A_RIGHT : A_NONE);
+                dir_event(ev.jhat.which, v & SDL_HAT_UP ? A_UP : v & SDL_HAT_DOWN ? A_DOWN : v & SDL_HAT_LEFT ? A_LEFT : v & SDL_HAT_RIGHT ? A_RIGHT : A_NONE);
             }
             if (ev.type == SDL_JOYAXISMOTION && ev.jaxis.axis <= 1 && (ev.jaxis.value < -16000 || ev.jaxis.value > 16000))
-                push(ev.jaxis.axis == 1 ? (ev.jaxis.value < 0 ? A_UP : A_DOWN) : (ev.jaxis.value < 0 ? A_LEFT : A_RIGHT));
+                dir_event(ev.jaxis.which, ev.jaxis.axis == 1 ? (ev.jaxis.value < 0 ? A_UP : A_DOWN) : (ev.jaxis.value < 0 ? A_LEFT : A_RIGHT));
             if (ev.type == SDL_JOYBUTTONDOWN) {
                 PadMap *m = pad_map(ev.jbutton.which);
                 int b = ev.jbutton.button;
@@ -2361,7 +2410,7 @@ static int run_picker(int export, const char *root, const char *out, SDL_Texture
         }
         if (!npk) text(f_hint, "Nothing to copy here", dim, W / 2, list_y + row_h * 2, 1);
         text(f_hint, "I  Tick / open folder     SELECT  Tick folder     II  Back     RUN  Copy", dim, W / 2, H * 91 / 100, 1);
-        if (shot && qhead == qtail && !rep_dir) {
+        if (shot && qhead == qtail && !rep_dir && (!getenv("PCE_LAUNCHER_SHOT_AFTER") || (int)SDL_GetTicks() >= atoi(getenv("PCE_LAUNCHER_SHOT_AFTER")))) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
             if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0) SDL_SaveBMP(ss, shot);
             _exit(3);
@@ -2401,8 +2450,20 @@ static void run_padtest(void)
             int u = H / 22, dx = cx + cw / 6, dy = cy + ch / 2 + u / 2, d;
             char lbl[32];
             fill(cx, cy, cw, ch, 28, 30, 40, 255);
-            snprintf(lbl, sizeof lbl, "Pad %d", i + 1);
+            {   /* the console's two ports are the cart reader's pads (2e25:988c), in order */
+                int port = 0, usb = 0, q;
+                for (q = 0; q <= i; q++) {
+                    SDL_Joystick *jq = pads[q].fake ? NULL : SDL_JoystickFromInstanceID(pads[q].id);
+                    if (pads[q].fake || (jq && SDL_JoystickGetVendor(jq) == 0x2e25)) port++; else usb++;
+                }
+                if (pads[i].fake || (j && SDL_JoystickGetVendor(j) == 0x2e25)) snprintf(lbl, sizeof lbl, "Port %d", port);
+                else snprintf(lbl, sizeof lbl, "USB pad %d", usb);
+            }
             text(f_hint, lbl, accent, cx + cw / 30, cy + ch / 30, 0);
+            if (!pad_trusted_k(i)) {                     /* never centred: an empty port */
+                text(f_item, "No controller", dim, cx + cw / 2, cy + ch / 2 - TTF_FontHeight(f_item) / 2, 1);
+                continue;
+            }
             if (!j) continue;
             /* d-pad cross */
             for (d = 0; d < 4; d++) {
@@ -2486,6 +2547,7 @@ int main(int argc, char **argv)
     if (ingame_mode) {
         ig_fifo = argv[2]; ig_base = argv[3];
         for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
+        fake_pad();
         return run_ingame(argc == 5 ? argv[4] : "");
     }
     if (SDL_GetCurrentDisplayMode(0, &dm) != 0 || dm.w <= 0) { dm.w = 1280; dm.h = 720; }
@@ -2506,6 +2568,7 @@ int main(int argc, char **argv)
     load_brand();
     if (pick_mode) {
         for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
+        fake_pad();
         load_titles();
         return run_picker(!strcmp(argv[2], "export"), lib_dir, argv[4], bg, shot);
     }
@@ -2522,6 +2585,7 @@ int main(int argc, char **argv)
     if (cur_folder[0] && !nreal) { cur_folder[0] = 0; scan_library(); }   /* the folder has gone */
     SDL_Log("screen %dx%d, %d games, data dir %s", W, H, ntotal, data_dir);
     for (i = 0; i < SDL_NumJoysticks(); i++) add_pad(i);
+    fake_pad();
 
     row_h = H / 15; list_y = H * 22 / 100; list_x = W / 10; list_w = W - 2 * list_x;
     rows = (H * 66 / 100) / row_h;
@@ -2558,14 +2622,14 @@ int main(int argc, char **argv)
                     int v = ev.jhat.value, d = A_NONE;
                     if (v & SDL_HAT_UP) d = A_UP; else if (v & SDL_HAT_DOWN) d = A_DOWN;
                     else if (v & SDL_HAT_LEFT) d = A_LEFT; else if (v & SDL_HAT_RIGHT) d = A_RIGHT;
-                    held = d; push(d); repeat_at = SDL_GetTicks() + 400;
+                    held = d; dir_event(ev.jhat.which, d); repeat_at = SDL_GetTicks() + 400;
                     break; }
                 case SDL_JOYAXISMOTION: {
                     int d = A_NONE, v = ev.jaxis.value;
                     if (ev.jaxis.axis == 1) d = v < -16000 ? A_UP : v > 16000 ? A_DOWN : A_NONE;
                     else if (ev.jaxis.axis == 0) d = v < -16000 ? A_LEFT : v > 16000 ? A_RIGHT : A_NONE;
                     else break;
-                    if (d != held) { held = d; push(d); repeat_at = SDL_GetTicks() + 400; }
+                    if (d != held) { held = d; dir_event(ev.jaxis.which, d); repeat_at = SDL_GetTicks() + 400; }
                     break; }
                 case SDL_JOYBUTTONDOWN: {
                     PadMap *m = pad_map(ev.jbutton.which);
@@ -2872,7 +2936,7 @@ int main(int argc, char **argv)
             if (cs != cart0 && cs != 0) { SDL_Log("exit: cartridge detected"); _exit(2); }
             cart0 = cs;
         }
-        if (!dirty) continue;
+        if (!dirty && !(shot && getenv("PCE_LAUNCHER_SHOT_AFTER"))) continue;   /* test hook: keep drawing until the timed screenshot */
         dirty = 0;
 
         /* ---- draw ---- */
@@ -3079,7 +3143,7 @@ int main(int argc, char **argv)
             text(f_item, msg, white, px + pw / 2, py + (ph - TTF_FontHeight(f_item)) / 2, 1);
         }
 
-        if (shot && qhead == qtail && !rep_dir) {
+        if (shot && qhead == qtail && !rep_dir && (!getenv("PCE_LAUNCHER_SHOT_AFTER") || (int)SDL_GetTicks() >= atoi(getenv("PCE_LAUNCHER_SHOT_AFTER")))) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
             if (ss && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, ss->pixels, ss->pitch) == 0)
                 SDL_SaveBMP(ss, shot);

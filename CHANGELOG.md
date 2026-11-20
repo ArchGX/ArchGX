@@ -1,5 +1,10 @@
 # Changelog
 
+## GP2.2: fix for menus scrolling by themselves
+
+- **Fix ([#5](https://github.com/ArchGX/ArchGX/issues/5)):** on some consoles, an empty controller port reads as Up held forever. GP2's hold-to-scroll then scrolled the menus up on their own when no TurboGrafx pad was plugged in (with no controller, or only a USB one). A pad's d-pad is now used only once it has been seen centred, which a real controller is as soon as you let go, and an empty port stuck on a direction never is. Hold-to-scroll works as before.
+- **Controller test:** pads are labelled **Port 1 / Port 2** (the console's ports) or **USB pad**, and a port stuck on a direction shows "No controller".
+
 ## GP2.1: easier updates, a visible first start
 
 - **Update from any version in one go:** the installer now updates the ArchGX system on the card in place, so the stock backup is no longer needed to update (only to uninstall). Stock → GP2.1 and GP1 → GP2.1 both work directly, with no versions in between, and give exactly the same system. Clearer messages say what the backup is for.
