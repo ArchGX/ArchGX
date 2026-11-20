@@ -49,6 +49,8 @@ Each reads the user's own stock SquashFS from the card, then:
    - `/etc/usbmount/usbmount.conf` turns automatic USB mounting off, because ArchGX mounts the reader itself, read-only.
 3. **Switches off Hyperkin's launcher programs** (mode 000, not deleted): `check_firmware`, `tgdumper-loading`, `menu`, `bte_fw_update_andrew`, and the scripts `check_dumper.sh`, `firmware_update.sh`, `partition_resize.sh`, `reset-btn.sh`, `start_tgdumper.sh` and the three `usbmount` RetroArch hooks.
 
+**Updating:** with the stock backup, the new system is built from it as on a first install. Without it, the card's current ArchGX system is the starting point: every step above can be repeated, and files listed in `/etc/archgx-files` (written by every install from GP2.1 on) that the new version no longer ships are removed. Both give the same system.
+
 **What the installer does not do:** no binary patches (no stock program is edited byte by byte), no changes to the boot chain, kernel or other partitions, and no Hyperkin files are copied into the release. The stock system partition is backed up first (`archgx-stock-rootfs.img`) and `restore` puts it back byte for byte.
 
 Everything else is the console's own: boot chain, kernel, Mali driver, Weston, SDL2, PulseAudio, the Beetle PCE Fast core and the fonts.
@@ -97,7 +99,8 @@ Besides `games/`, `saves/` and its own files on the card, ArchGX writes to a few
 
 | Where | What | Why |
 |---|---|---|
-| `gb_rom` partition | Enlarged or recreated by `fix_storage.sh` on first start if still stock-sized (files are kept); named `RETRONGX` by `fat-label` if it has no name | The stock resize deleted this partition on large cards |
+| `gb_rom` partition | Enlarged or recreated by `fix_storage.sh` on first start if still stock-sized (files are kept), behind a "Preparing your SD card" screen; named `RETRONGX` by `fat-label` if it has no name | The stock resize deleted this partition on large cards |
+| `/userdata/fix_storage.log` | Each first-start step (copied to `logs/fix_storage-steps.log`) | Survives a failed format |
 | `/userdata/retroarch/retroarch-core-options.cfg` | Before each game: `pce_disable_softreset`, `sgx_disable_softreset`, `sgx_forcesgx`, the CD BIOS choice, sprite limit and palette options | RUN+SELECT is the menu combo, not a soft reset; Options-menu choices |
 | `/userdata/retroarch_org/` (stock persistent copy of the RetroArch settings) | After each game, settings changed in RetroArch's own menu are copied back; a `.stock` copy is kept once. An empty `reset-retroarch-settings` file on the card restores the stock settings | So RetroArch menu changes survive a restart, as stock |
 | `/userdata/*.pce` | System Card files from `bios/` are copied where the cores look for them | CD games |

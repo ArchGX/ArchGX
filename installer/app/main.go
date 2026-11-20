@@ -176,14 +176,24 @@ func main() {
 			if err := os.WriteFile(bpath, cur, 0644); err != nil {
 				fail(fmt.Errorf("could not save the stock backup to %s: %v", bpath, err))
 			}
-			say("Saved a backup of the stock system: %s\n  Keep this file: it lets you undo the install and update ArchGX later.", bpath)
+			say("Saved a backup of the stock system: %s\n  Keep this file: it lets you uninstall ArchGX later (updates work without it).", bpath)
 		}
 	} else {
 		b, err := os.ReadFile(bpath)
-		if err != nil || sum(b) != stockRootfsSHA256 {
-			fail(fmt.Errorf("this card already runs ArchGX. To update or uninstall, the stock backup %s is needed: put it next to this program", backupName))
+		switch {
+		case err == nil && sum(b) == stockRootfsSHA256:
+			say("Stock backup found: %s", bpath)
+			base = b
+		case *restore:
+			fail(fmt.Errorf("uninstalling needs the stock backup %s, saved by the first ArchGX install.\n"+
+				"  Put it next to this program and run it again.\n"+
+				"  Without it: re-flash a stock RetroN GX card image instead (back up games/ and saves/ first)", backupName))
+		default:
+			// update in place: the card's own ArchGX system is the starting point
+			say("No stock backup next to this program: updating the ArchGX system on the card in place.\n"+
+				"  That works fine. Keep %s (made by your first install) if you might want to uninstall one day.", backupName)
+			base = cur
 		}
-		base = b
 	}
 
 	// ---- what to do ----------------------------------------------------------
@@ -200,7 +210,7 @@ func main() {
 		say("\nPreparing %s...", version)
 		root, sb, err := ReadSquashfs(base)
 		if err != nil {
-			fail(fmt.Errorf("reading the stock system: %v", err))
+			fail(fmt.Errorf("reading the system partition: %v", err))
 		}
 		v, err := convert(root, payload)
 		if err != nil {

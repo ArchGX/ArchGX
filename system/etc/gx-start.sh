@@ -998,7 +998,22 @@ usb_job() {
 
 # ---------------------------------------------------------------- main
 mkdir -p $TMP
-[ -x /etc/fix_storage.sh ] && /etc/fix_storage.sh      # our storage-partition fix
+# First start on a freshly flashed card: the storage partition is enlarged
+# and formatted. That can take minutes on a big card, so it gets its own
+# screen instead of a frozen boot logo (the card isn't mounted yet: logs go
+# to /tmp and /userdata until it is).
+if [ -x /etc/fix_storage.sh ]; then
+	if /etc/fix_storage.sh --needed; then
+		printf '%s\n%s\n-\n\n' "Preparing your SD card" "First start only: please wait" > $TMP/status
+		/usr/bin/pce-launcher --status $TMP/status >> /tmp/launcher-boot.log 2>&1 & fsp=$!
+		STATUS=$TMP/status /etc/fix_storage.sh; fsr=$?
+		if [ $fsr = 0 ]; then printf '%s\n%s\n\n\n' "SD card ready" "Starting ArchGX..." > $TMP/status; sleep 2
+		else sleep 15; fi                                    # leave the error on screen
+		printf '\n\n\ndone\n' > $TMP/status; sleep 1; kill $fsp 2>/dev/null; rm -f $TMP/status
+	else
+		/etc/fix_storage.sh
+	fi
+fi
 # A card formatted on a computer has no name: call it RETRONGX, like the
 # console's own format (a name you chose is kept). Done before anything
 # opens a file on the card, with the partition briefly unmounted.
@@ -1015,6 +1030,8 @@ fi
 mkdir -p "$GAMES" "$LOGD" "$SAVES" "$BIOS_DIR" "$F_PCE" "$F_TG" "$F_SGX" "$F_CD"
 [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 262144 ] && mv "$LOG" "$LOG.old"
 log "==== $(cat /etc/archgx-release 2>/dev/null || echo ArchGX) ($(date))"
+# the first-start log (kept on /userdata in case the card couldn't be formatted)
+[ -f /userdata/fix_storage.log ] && cp /userdata/fix_storage.log "$LOGD/fix_storage-steps.log" 2>/dev/null
 [ -n "$label_msg" ] && log "$label_msg"
 
 # Recovery: "reset-retroarch-settings" on the card restores the stock RetroArch settings
